@@ -51,10 +51,6 @@
   --r:   10px;
   --r2:  14px;
   --r3:  20px;
-  /* Additional radius tokens to eliminate magic numbers */
-  --r-sm:   4px;   /* small: badges, inline code */
-  --r-md:   8px;   /* medium: inputs, smaller cards */
-  --r-pill: 100px; /* pill shape: tags, buttons */
 
   --input-bg: #0f1320;
 }
@@ -71,7 +67,10 @@ body {
   line-height: 1.6;
 }
 
-/* Scanline overlay */
+/* Scanline overlay — decorative CRT effect.
+   z-index set to 100 so it sits above normal content but well below modals,
+   overlays and toasts which use z-index 2000–10000.
+   pointer-events:none ensures it never intercepts clicks. */
 body::before {
   content: '';
   position: fixed;
@@ -84,7 +83,7 @@ body::before {
     rgba(0,0,0,.08) 4px
   );
   pointer-events: none;
-  z-index: 9999;
+  z-index: 100;
 }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -148,15 +147,15 @@ body.light h3,
 body.light h4   { font-weight: 800; color: var(--t1); }
 body.light strong { font-weight: 800; }
 
-/* Alle kleine tekst (9px/10px/11px) → 13px minimum */
-body.light [style*="font-size:16px"],
-body.light [style*="font-size: 16px"],
-body.light [style*="font-size:15px"],
-body.light [style*="font-size: 15px"],
-body.light [style*="font-size:16px"],
-body.light [style*="font-size: 16px"] { font-size: 15px !important; font-weight: 600 !important; }
-body.light [style*="color:var(--t3)"],
-body.light [style*="color:var(--t4)"] { color: var(--t3) !important; }
+/* Feed / narrative body text — enforce legible size in light (projection) mode.
+   Previously targeted via fragile [style*="font-size:…"] attribute selectors,
+   which break on whitespace variants and create specificity conflicts.
+   The style attribute is no longer in the sanitizer allowlist, so these class-based
+   selectors are the correct and stable replacement. */
+body.light .feed-text,
+body.light .sc-story,
+body.light .sc-win,
+body.light .cin-text { font-size: 15px !important; font-weight: 600 !important; }
 
 /* ── Scanline uit ── */
 body.light::before { display: none; }
@@ -327,17 +326,13 @@ body:not(.light) .syn-table td { color: var(--t2); font-size: 15px; }
 body:not(.light) .syn-tip    { color: var(--t2); font-size: 15px; }
 body:not(.light) .syn-tip-warn { color: var(--yellow); font-weight: 600; }
 
-/* ── Inline [style] overrides: kleine tekst in dark mode ── */
-body:not(.light) [style*="font-size:16px"],
-body:not(.light) [style*="font-size: 16px"],
-body:not(.light) [style*="font-size:15px"],
-body:not(.light) [style*="font-size: 15px"],
-body:not(.light) [style*="font-size:16px"],
-body:not(.light) [style*="font-size: 16px"] { font-size: 16px !important; font-weight: 600 !important; }
-
-/* ── Zorg dat t3/t4 inline stijlen ook helderder zijn in dark mode ── */
-body:not(.light) [style*="color:var(--t3)"] { color: var(--t3) !important; }
-body:not(.light) [style*="color:var(--t4)"] { color: var(--t4) !important; }
+/* Feed / narrative body text — enforce legible size in dark mode.
+   Same rationale as light-mode block above: class-based selectors replace
+   fragile [style*=] attribute selectors. */
+body:not(.light) .feed-text,
+body:not(.light) .sc-story,
+body:not(.light) .sc-win,
+body:not(.light) .cin-text { font-size: 16px !important; font-weight: 600 !important; }
 
 /* ── Feed tekst ── */
 body:not(.light) .feed-title { color: var(--t1); font-weight: 700; font-size: 16px; }
@@ -1025,8 +1020,8 @@ body.light ::-webkit-scrollbar-thumb:hover { background: var(--border3); }
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(34,211,238,.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34,211,238,.03) 1px, transparent 1px);
+    linear-gradient(rgba(34,211,238,.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34,211,238,.025) 1px, transparent 1px);
   background-size: 60px 60px;
   mask-image: radial-gradient(ellipse 90% 90% at 50% 50%, black, transparent);
 }
@@ -2303,7 +2298,7 @@ table.data-table td {
 }
 
 table.data-table tr:last-child td { border-bottom: none; }
-table.data-table tr:nth-child(even) td { background: rgba(34,211,238,.02); }
+table.data-table tr:nth-child(even) td { background: rgba(34,211,238,.018); }
 table.data-table tr:hover td { background: rgba(34,211,238,.055); }
 table.data-table td.pk { color: var(--yellow); }
 table.data-table td.fk { color: var(--purple); }
@@ -2679,13 +2674,11 @@ table.data-table td.fk { color: var(--purple); }
 /* divider */
 .divider { height: 1px; background: var(--border); margin: 16px 0; }
 .ach-desc { font-size: 15px; } /* min 10px for readability */
-/* ── Inline 9px overrides voor projectie (light mode) ── */
-body.light [style*="font-size:16px"],
-body.light [style*="font-size: 16px"] { font-size: 16px !important; }
-body.light [style*="font-size:15px"],
-body.light [style*="font-size: 15px"] { font-size: 16px !important; }
-body.light [style*="color:var(--t4)"] { color: var(--t3) !important; }
-body.light [style*="color:var(--t3)"] { color: var(--t2) !important; }
+/* ── Projection mode (light) text overrides ──
+   Previously used fragile [style*="font-size:…"] attribute selectors (now removed).
+   The style attribute is no longer in the sanitizer allowlist, so these selectors
+   had no effect. Legibility is now enforced via .feed-text / .sc-story class rules
+   defined earlier in this file. */
 
 
 /* ── PREMIUM ENHANCEMENTS ── */
@@ -3383,7 +3376,7 @@ body.light .why-error-box { background:rgba(220,38,38,.04);border-color:rgba(220
 body.light .mastery-tile { background:#fff;border-color:var(--border); }
 
 /* ══ HOOFDSTUK RECAP MODAL ══ */
-#chapter-recap-overlay { position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);z-index:2000;display:none;align-items:center;justify-content:center;padding:20px; }
+#chapter-recap-overlay { position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);z-index:2000;align-items:center;justify-content:center;padding:20px; }
 .recap-modal { background:var(--panel);border:1px solid var(--border2);border-radius:18px;max-width:520px;width:100%;padding:28px 28px 24px;box-shadow:0 40px 80px rgba(0,0,0,.5);animation:recapPop .4s cubic-bezier(.34,1.56,.64,1);max-height:90vh;overflow-y:auto; }
 @keyframes recapPop { from{opacity:0;transform:scale(.88) translateY(20px)} to{opacity:1;transform:scale(1) translateY(0)} }
 .recap-header { text-align:center;margin-bottom:22px; }
@@ -4493,21 +4486,21 @@ kbd {
    ══════════════════════════════════════════════════════ */
 
 /* ── Overlays & Modals ── */
-#chapter-recap-overlay {
-  display: none;
+/* Hidden by default via CSS class; shown via .overlay-visible */
+#chapter-recap-overlay,
+#completion-overlay {
   position: fixed;
   inset: 0;
+  z-index: 2000;
+}
+#chapter-recap-overlay {
   background: rgba(0,0,0,.75);
   backdrop-filter: blur(6px);
-  z-index: 2000;
   align-items: center;
   justify-content: center;
   padding: 20px;
 }
 #completion-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
   z-index: 10000;
   background: rgba(7,9,15,.97);
   flex-direction: column;
@@ -4515,6 +4508,9 @@ kbd {
   justify-content: center;
   overflow-y: auto;
 }
+.overlay-hidden { display: none !important; }
+.overlay-visible { display: flex !important; }
+.boot-saved-hidden { display: none !important; }
 .comp-content {
   position: relative;
   z-index: 1;
@@ -4669,9 +4665,7 @@ body.light .db-shortcut-btn:hover {
   background: var(--cyan-dim);
 }
 
-/* ── ERD tab (hidden by default) ── */
-#db-tab-erd { display: none; }
-#db-tab-data { display: none; }
+/* ── ERD & Data tabs (hidden by default via .u-hidden class in HTML) ── */
 
 /* ── ERD legend colors ── */
 .erd-leg-pk { color: var(--yellow); }
@@ -5110,6 +5104,42 @@ body.light .db-shortcut-btn:hover {
   padding: 6px;
 }
 
+/* Ghost vorige poging */
+.tut-ghost-attempt {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.03);
+  border: 1px dashed var(--border2);
+  font-size: 13px;
+  color: var(--t3);
+}
+.tut-ghost-label {
+  display: block;
+  font-size: 11px;
+  color: var(--t4);
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+.tut-ghost-code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--t2);
+  word-break: break-all;
+}
+
+/* Deep-link knop in foutmelding */
+.tut-deeplink-btn {
+  margin-top: 6px;
+  font-size: 12px !important;
+  padding: 3px 10px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* ── Settings progress grid ── */
 .set-progress-grid {
   display: grid;
@@ -5207,7 +5237,6 @@ body.light .db-shortcut-btn:hover {
 
 /* ── Key help modal ── */
 #key-help {
-  display: none;
   position: fixed;
   top: 50%;
   left: 50%;
@@ -5248,7 +5277,6 @@ body.light .db-shortcut-btn:hover {
   width: 100%;
 }
 #key-help-backdrop {
-  display: none;
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,.5);
@@ -5914,7 +5942,27 @@ body.light .sc-count-row { border-bottom-color: var(--border) !important; }
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  transition: none;
 }
+/* Expanded: toon volledige tekst */
+.daily-card-story.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.daily-story-toggle {
+  font-size: 12px;
+  color: var(--cyan);
+  background: none;
+  border: none;
+  padding: 2px 0 0;
+  cursor: pointer;
+  font-family: var(--mono);
+  letter-spacing: .3px;
+  display: block;
+  margin-top: 2px;
+}
+.daily-story-toggle:hover { text-decoration: underline; }
 .daily-card-footer {
   display: flex;
   align-items: center;
@@ -5996,8 +6044,9 @@ body.light .sc-count-row { border-bottom-color: var(--border) !important; }
 .daily-icon-wrap--medium { background: rgba(251,146,60,.08);  border-color: rgba(251,146,60,.4);  flex-shrink: 0; }
 .daily-icon-wrap--hard   { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.4); flex-shrink: 0; }
 
-/* ── Hidden utility ── */
+/* ── Hidden utilities ── */
 .hidden { display: none !important; }
+.u-hidden { display: none !important; }
 
 /* ── Tut hint toggle initial state ── */
 .tut-exercise-hint.hidden { display: none; }
@@ -6005,3 +6054,43 @@ body.light .sc-count-row { border-bottom-color: var(--border) !important; }
 /* ── Tutorial textarea: geen syntax-highlight overlay in light mode ── */
 body.light #hl-tut-ex { display: none !important; }
 body.light #tut-ex-sql { color: var(--t1) !important; }
+
+/* ── Lang switcher (moved from inline <style>) ── */
+.lang-switcher{display:flex;gap:4px;align-items:center;margin-left:auto}
+.lang-btn{background:transparent;border:1px solid var(--border2,#333);color:var(--fg2,#aaa);font-size:11px;font-weight:700;padding:3px 8px;border-radius:4px;cursor:pointer;letter-spacing:.5px;transition:all .15s}
+.lang-btn.active,.lang-btn:hover{border-color:var(--cyan,#22d3ee);color:var(--cyan,#22d3ee);background:rgba(34,211,238,.08)}
+
+/* ── Audit fixes: replaced inline styles with classes ── */
+/* boot-lang-toggle (was style="margin-top:10px;display:flex;justify-content:center;gap:6px") */
+.boot-lang-toggle { margin-top:10px; display:flex; justify-content:center; gap:6px; }
+
+/* shield-count-label (was style="font-size:11px") */
+.shield-count-label { font-size:11px; }
+
+/* sb-lang-row / sb-lang-icon (sidebar lang row) */
+.sb-lang-row { display:flex; align-items:center; padding:6px 14px; gap:8px; }
+.sb-lang-icon { font-size:12px; color:var(--fg2); }
+
+/* skill-mastery-panel (was inline background/border/etc) */
+.skill-mastery-panel { background:var(--panel); border:1px solid var(--border); border-radius:var(--r2); padding:16px 20px; margin-bottom:20px; }
+
+/* mastery-section-title--skill (was style="margin-top:20px") */
+.mastery-section-title--skill { margin-top:20px; }
+
+/* debug-buggy-label (was style="font-size:11px;color:var(--red);font-weight:700;display:block;margin-bottom:4px") */
+.debug-buggy-label { font-size:11px; color:var(--red); font-weight:700; display:block; margin-bottom:4px; }
+
+/* hint-l3-warning-inline (was style="color:var(--red);font-weight:800") */
+.hint-l3-warning-inline { color:var(--red); font-weight:800; }
+
+/* hint-ladder-cost (was style="color:var(--t4);font-weight:400;font-size:11px;margin-left:auto") */
+.hint-ladder-cost { color:var(--t4); font-weight:400; font-size:11px; margin-left:auto; }
+
+/* hint-max-label (was style="font-size:12px;color:var(--t4)") */
+.hint-max-label { font-size:12px; color:var(--t4); }
+
+/* hint-level-label (was style="font-size:11px;color:var(--t4)") */
+.hint-level-label { font-size:11px; color:var(--t4); }
+
+/* hint-l3-bonus-blocked (was style="color:var(--orange);font-size:12px") */
+.hint-l3-bonus-blocked { color:var(--orange); font-size:12px; }
