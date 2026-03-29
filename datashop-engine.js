@@ -89,14 +89,16 @@ function sanitizeHTML(html) {
             node.removeAttribute(attr.name);
           }
         }
-        // Sanitize href on <A> tags: strip javascript:, vbscript:, data: URIs.
-        // href is not currently in allowedAttrs, but this guard future-proofs against
-        // it being added later, and catches any browser quirk that preserves the attr.
+        // SEC-1 fix: sanitize href on <A> tags — strip javascript:, vbscript:, data: URIs.
+        // href is in allowedAttrs; this guard prevents script-protocol injection.
         if (node.tagName === 'A' && node.hasAttribute('href')) {
           const href = node.getAttribute('href').replace(/\s/g, '').toLowerCase();
           if (/^(javascript|vbscript|data):/.test(href)) {
             node.removeAttribute('href');
           }
+          // SEC-1 fix: ensure all external links have noopener/noreferrer
+          node.setAttribute('rel', 'noopener noreferrer');
+          node.setAttribute('target', '_blank');
         }
         // Recursively sanitize children
         walkAndSanitize(node);
@@ -132,7 +134,19 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function $(id) { return document.getElementById(id); }
+// Fix #4: Make $() a caching wrapper over EL so $('foo') and EL['foo'] always
+// refer to the same cached node. EL properties defined via Object.defineProperty
+// handle their own lazy initialisation; plain string keys are set here on first
+// use. Do NOT cache IDs inside dynamically re-rendered containers — call
+// EL._flush() after any innerHTML replacement that destroys cached children.
+function $(id) {
+  const cached = EL[id];
+  if (cached !== undefined) return cached;
+  const el = document.getElementById(id);
+  // Only store in EL if the slot isn't already a defineProperty getter
+  if (el && !Object.getOwnPropertyDescriptor(EL, id)) EL[id] = el;
+  return el;
+}
 
 // ── Query history for terminal (↑↓ navigation) ──────────────────
 const _qHistory = [];
@@ -249,11 +263,32 @@ function loadOpenSc() {
 // O9: Debounced save — multiple rapid save() calls (e.g. solve → ach → chapter check)
 // only write to localStorage once. saveNow() is available for critical moments.
 let _saveTimer = null;
-function save() { clearTimeout(_saveTimer); _saveTimer = setTimeout(_doSave, 200); }
-function saveNow() { clearTimeout(_saveTimer); _doSave(); }
+let _resetPending = false;  // set to true before reload so beforeunload doesn't re-save
+
+// ── SEC-1 FIX: Integrity check for localStorage ─────────────────
+// Simple checksum to detect casual tampering via DevTools.
+// Not cryptographically unbreakable (client-side key is inspectable), but raises
+// the bar significantly above "just edit the JSON". The hash uses FNV-1a with a
+// salt derived from the player name, so each save file has a unique checksum.
+const _INTEGRITY_SALT = 'D4t4Sh0p_CEO_2026_';
+function _fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+function _computeChecksum(jsonStr) {
+  return _fnv1a(_INTEGRITY_SALT + jsonStr + _INTEGRITY_SALT);
+}
+
+function save() { if (_resetPending) return; clearTimeout(_saveTimer); _saveTimer = setTimeout(_doSave, 200); }
+function saveNow() { if (_resetPending) return; clearTimeout(_saveTimer); _doSave(); }
 function _doSave() {
+  if (_resetPending) return;
   try {
-    localStorage.setItem('datashop_v3', JSON.stringify({
+    const payload = JSON.stringify({
       name: G.name, xp: G.xp, rep: G.rep, streak: G.streak,
       done: [...G.done], ach: [...G.ach],
       tutDone: [...G.tutDone],
@@ -266,7 +301,9 @@ function _doSave() {
       streakShields: G.streakShields || 0,
       weekStreak: G.weekStreak || 0,
       correctThisWeek: G.correctThisWeek || 0,
-    }));
+    });
+    localStorage.setItem('datashop_v3', payload);
+    localStorage.setItem('datashop_v3_chk', _computeChecksum(payload));
   } catch(e) {
     // QuotaExceededError: localStorage is full (common in private/incognito mode).
     // Show a non-blocking toast so the user knows their progress was not saved.
@@ -285,6 +322,19 @@ function load() {
   try {
     const raw = localStorage.getItem('datashop_v3');
     if (!raw) return false;
+    // SEC-1: Verify integrity checksum
+    const storedChk = localStorage.getItem('datashop_v3_chk');
+    if (storedChk) {
+      // Checksum exists — verify it. If tampered, warn and reject.
+      const expectedChk = _computeChecksum(raw);
+      if (storedChk !== expectedChk) {
+        console.warn('[load] Save data integrity check failed — data may have been tampered with.');
+        // Mark save as tampered so certificate can reflect this
+        G._tampered = true;
+        // Still load the data (don't lock students out), but flag it
+      }
+    }
+    // If no checksum exists, this is a pre-update save — migrate silently
     const d = JSON.parse(raw);
     if (typeof d !== "object" || d === null) return false;
     G.name    = typeof d.name === 'string' ? d.name.slice(0, 40) : '';
@@ -421,7 +471,13 @@ function resetDB() {
 
 function dbStats() {
   const b=DB.bestelling.rows, p=DB.product.rows, k=DB.klant.rows;
-  const rev=b.reduce((s,o)=>{const pr=p.find(x=>x.product_id===o.product_id);return s+(pr?pr.prijs*o.aantal:0);},0);
+  // Fix #5: Build a product_id→prijs map once (O(p)) so the reduce is O(b)
+  // rather than O(b×p). p.find() inside reduce was O(n²).
+  const priceMap = Object.fromEntries(p.map(x => [x.product_id, x.prijs]));
+  const rev = b.reduce((s, o) => {
+    const prijs = priceMap[o.product_id];
+    return s + (prijs !== undefined ? prijs * o.aantal : 0);
+  }, 0);
   return {
     klanten:   k.length,
     actief:    k.filter(x=>x.actief).length,
@@ -523,7 +579,7 @@ function evalWhere(row, clause) {
   if(m){const rv=row[m[1]];const rn=Number(rv);const vals=m[2].split(',').map(v=>{const t=v.trim().replace(/^'|'$/g,'');return isNaN(Number(t))?t.toLowerCase():Number(t);});return !vals.some(v=>typeof v==='number'?v===rn:v===String(rv||'').toLowerCase());}
   m=clause.match(/^(\w+)\s+IN\s*\(([^)]+)\)$/i);
   if(m){const rv=row[m[1]];const rn=Number(rv);const vals=m[2].split(',').map(v=>{const t=v.trim().replace(/^'|'$/g,'');return isNaN(Number(t))?t.toLowerCase():Number(t);});return vals.some(v=>typeof v==='number'?v===rn:v===String(rv||'').toLowerCase());}
-  m=clause.match(/^(\w+)\s+BETWEEN\s+['"]?([^'">\s]+)['"]?\s+AND\s+['"]?([^'">\s]+)['"]?$/i);
+  m=clause.match(/^(\w+)\s+BETWEEN\s+['"]?([^'"\s]+)['"]?\s+AND\s+['"]?([^'"\s]+)['"]?$/i);
   if(m){const rv=row[m[1]],n=Number(rv),lo=Number(m[2]),hi=Number(m[3]);if(!isNaN(n)&&!isNaN(lo)&&!isNaN(hi))return n>=lo&&n<=hi;return String(rv)>=m[2]&&String(rv)<=m[3];}
   m=clause.match(/^(?:\w+\.)?(\w+)\s*(>=|<=|!=|<>|>|<|=)\s*'?([^']*?)'?$/);
   if(m){
@@ -552,10 +608,11 @@ function evalWhereJoin(row, clause) {
   m=clause.match(/^([\w.]+)\s+IS\s+NOT\s+NULL$/i); if(m) return resolve(m[1])!=null;
   m=clause.match(/^([\w.]+)\s+IS\s+NULL$/i);        if(m) return resolve(m[1])==null;
   m=clause.match(/^([\w.]+)\s*(=|!=|<>|>|<|>=|<=)\s*([\w.]+)$/);
-  if(m){const lv=resolve(m[1]),rv=resolve(m[3]);const eq=(a,b)=>typeof a==='string'&&typeof b==='string'?a.toLowerCase()===b.toLowerCase():a==b;switch(m[2]){case'=':return eq(lv,rv);case'!=':case'<>':return !eq(lv,rv);case'>':return lv>rv;case'<':return lv<rv;case'>=':return lv>=rv;case'<=':return lv<=rv;}}
+  if(m){const lv=resolve(m[1]),rv=resolve(m[3]);const eq=(a,b)=>typeof a==='string'&&typeof b==='string'?a.toLowerCase()===b.toLowerCase():a===b;switch(m[2]){case'=':return eq(lv,rv);case'!=':case'<>':return !eq(lv,rv);case'>':return lv>rv;case'<':return lv<rv;case'>=':return lv>=rv;case'<=':return lv<=rv;}}
   m=clause.match(/^([\w.]+)\s*(=|!=|<>|>|<|>=|<=)\s*'?([^']*?)'?$/);
-  if(m){const rv2=resolve(m[1]),cv=typeof rv2==='number'&&!isNaN(Number(m[3]))?Number(m[3]):m[3];const eq=(a,b)=>typeof a==='string'&&typeof b==='string'?a.toLowerCase()===b.toLowerCase():a==b;switch(m[2]){case'=':return eq(rv2,cv);case'!=':case'<>':return !eq(rv2,cv);case'>':return rv2>cv;case'<':return rv2<cv;case'>=':return rv2>=cv;case'<=':return rv2<=cv;}}
-  return false;
+  if(m){const rv2=resolve(m[1]),cv=typeof rv2==='number'&&!isNaN(Number(m[3]))?Number(m[3]):m[3];const eq=(a,b)=>typeof a==='string'&&typeof b==='string'?a.toLowerCase()===b.toLowerCase():a===b;switch(m[2]){case'=':return eq(rv2,cv);case'!=':case'<>':return !eq(rv2,cv);case'>':return rv2>cv;case'<':return rv2<cv;case'>=':return rv2>=cv;case'<=':return rv2<=cv;}}
+  // Unrecognised condition: throw so callers get a clear error (consistent with evalWhere).
+  throw new Error('Onbekende JOIN WHERE-conditie: ' + clause);
 }
 
 function parseVals(str) {
@@ -589,6 +646,9 @@ function runSQL(rawSql) {
   if(sl.startsWith('create table')) return doCreate(s);
   if(sl.startsWith('alter table'))  return doAlter(s);
   if(sl.startsWith('drop'))         return err(t('js_eng_drop_forbidden'));
+  // Targeted errors for unsupported SQL features — clearer than the generic fallback
+  if(/\bunion\b/i.test(sl))          return err(t('js_eng_union_unsupported'));
+  if(/\btruncate\b/i.test(sl))       return err(t('js_eng_truncate_unsupported'));
   return err(stripSolution(t('js_eng_use_statement')));
 }
 
@@ -665,6 +725,143 @@ function evalCase(expr, row) {
   return elseVal;
 }
 
+// ── SHARED MULTI-COLUMN ORDER BY ─────────────────────────────────
+// Parses "col1 ASC, col2 DESC, col3" into [{col, asc}, ...] and applies
+// a stable sort chain. Fixes BUG-1: multi-column ORDER BY was silently
+// ignored — only the first column (with trailing comma) was used.
+function parseOrderCols(orderByStr) {
+  return orderByStr.split(',').map(part => {
+    const tokens = part.trim().split(/\s+/);
+    const col = tokens[0];
+    const asc = !tokens[1] || tokens[1].toUpperCase() === 'ASC';
+    return { col, asc };
+  }).filter(o => o.col);
+}
+
+function applyMultiSort(rows, orderByStr, resolveColFn) {
+  const cols = parseOrderCols(orderByStr);
+  if (!cols.length) return;
+  rows.sort((a, b) => {
+    for (const { col, asc } of cols) {
+      let av, bv;
+      if (resolveColFn) {
+        av = resolveColFn(col, a);
+        bv = resolveColFn(col, b);
+      } else {
+        const bare = col.replace(/^\w+\./, '');
+        av = a[bare] ?? a[col];
+        bv = b[bare] ?? b[col];
+      }
+      if (av < bv) return asc ? -1 : 1;
+      if (av > bv) return asc ? 1 : -1;
+    }
+    return 0;
+  });
+}
+
+// ── SHARED AGGREGATE COMPUTATION ─────────────────────────────────
+// ARCH-3+4: Extracted from doExplicitJoin, doSingleSelect, and doJoin
+// to eliminate triple-duplicated GROUP BY / HAVING logic.
+function computeAggregate(fn, vals) {
+  switch(fn) {
+    case 'AVG': return vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2) : null;
+    case 'SUM': return vals.reduce((a,b)=>a+b,0).toFixed(2);
+    case 'MAX': return vals.length ? Math.max(...vals) : null;
+    case 'MIN': return vals.length ? Math.min(...vals) : null;
+  }
+  return null;
+}
+
+// Shared GROUP BY: groups rows, computes aggregates, returns result rows.
+// resolveColFn(ref, row) resolves a column reference to its value.
+// For simple tables: (ref, row) => row[ref]
+// For JOINs: the prefixed resolver from doExplicitJoin/doJoin
+function applyGroupBy(rows, grpBy, colStr, resolveColFn) {
+  if (!resolveColFn) resolveColFn = (ref, row) => row[ref];
+  const grpKey = grpBy.replace(/^\w+\./, '');
+  const grps = {};
+  rows.forEach(r => {
+    const k = resolveColFn(grpBy, r) ?? resolveColFn(grpKey, r) ?? 'NULL';
+    if (!grps[k]) grps[k] = [];
+    grps[k].push(r);
+  });
+  const colParts = colStr.split(',').map(c => c.trim());
+  const gRows = Object.entries(grps).map(([k, grpRows]) => {
+    const out = {};
+    colParts.forEach(p => {
+      const aliasM = p.match(/^(.+?)\s+as\s+(\w+)$/i);
+      const expr = aliasM ? aliasM[1].trim() : p;
+      const label = aliasM ? aliasM[2] : expr;
+      if (/^count\s*\(\s*\*\s*\)$/i.test(expr)) {
+        out[label] = grpRows.length;
+      } else {
+        const aggM = expr.match(/^(AVG|SUM|MAX|MIN)\s*\(\s*([\w.]+)\s*\)$/i);
+        if (aggM) {
+          const fn = aggM[1].toUpperCase(), col = aggM[2];
+          const vals = grpRows.map(r => Number(resolveColFn(col, r))).filter(v => !isNaN(v));
+          out[label] = computeAggregate(fn, vals);
+        } else {
+          // Plain column (typically the GROUP BY key)
+          const bare = expr.replace(/^\w+\./, '');
+          out[label.replace(/^\w+\./, '')] = resolveColFn(expr, grpRows[0]) ?? resolveColFn(bare, grpRows[0]) ?? k;
+        }
+      }
+    });
+    return out;
+  });
+  return { gRows, colParts };
+}
+
+// Shared HAVING filter: supports COUNT(*) > n, AVG(col) > n, alias > n
+// colParts is needed for alias resolution (BUG-4 fix)
+function applyHaving(rows, having, colParts) {
+  if (!having) return rows;
+  const hm = having.match(/(count\s*\(\s*\*\s*\)|(?:AVG|SUM|MAX|MIN)\s*\(\s*[\w.]+\s*\))\s*(>|<|>=|<=|=|!=)\s*([\d.]+)/i);
+  const aliasHm = !hm ? having.match(/^(\w+)\s*(>|<|>=|<=|=|!=)\s*([\d.]+)$/i) : null;
+
+  const evalHaving = (v, op, n) => {
+    switch(op){ case'>':return v>n; case'<':return v<n; case'>=':return v>=n; case'<=':return v<=n; case'=':return v==n; case'!=':return v!=n; }
+    return true;
+  };
+
+  // Find the row key that matches the HAVING expression (raw aggregate or alias)
+  const findKey = (r, exprRaw) => {
+    // ENG-4 fix: removed .includes() fallback that could match partial key names.
+    // Exact match (after whitespace normalization) handles all legitimate cases.
+    let key = Object.keys(r).find(k => k.toUpperCase().replace(/\s+/g,'') === exprRaw);
+    if (key) return key;
+    if (exprRaw.includes('COUNT')) { key = Object.keys(r).find(k => k === 'COUNT(*)'); if (key) return key; }
+    // Alias resolution: check SELECT colParts for aggregate→alias mapping
+    if (colParts) {
+      for (const p of colParts) {
+        const am = p.match(/^(.+?)\s+as\s+(\w+)$/i);
+        if (am && am[1].trim().toUpperCase().replace(/\s+/g,'') === exprRaw) {
+          key = Object.keys(r).find(k => k === am[2]);
+          if (key) return key;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  if (hm) {
+    const havExprRaw = hm[1].toUpperCase().replace(/\s+/g,''), op = hm[2], n = Number(hm[3]);
+    return rows.filter(r => {
+      const key = findKey(r, havExprRaw);
+      if (key === undefined) return true;
+      return evalHaving(Number(r[key]), op, n);
+    });
+  } else if (aliasHm) {
+    const aliasName = aliasHm[1], op = aliasHm[2], n = Number(aliasHm[3]);
+    return rows.filter(r => {
+      const key = Object.keys(r).find(k => k.toLowerCase() === aliasName.toLowerCase());
+      if (key === undefined) return true;
+      return evalHaving(Number(r[key]), op, n);
+    });
+  }
+  return rows;
+}
+
 function doSelect(sql) {
   // Resolve subqueries first
   if (/\(\s*SELECT/i.test(sql)) sql = resolveSubqueries(sql);
@@ -673,7 +870,13 @@ function doSelect(sql) {
   if (/\b(INNER|LEFT|RIGHT|CROSS)?\s*JOIN\b/i.test(sql)) return doExplicitJoin(sql);
   // Detect implicit JOIN (comma-separated tables)
   const fm=sql.match(/\bfrom\s+([\w\s,]+?)(?:\s+(?:where|order|limit|group|having)\b|$)/i);
-  if(fm&&fm[1].includes(',')) return doJoin(sql)||doSingleSelect(sql);
+  if(fm&&fm[1].includes(',')) {
+    const joinRes = doJoin(sql);
+    if (joinRes) return joinRes;
+    // doJoin returned null — the implicit JOIN syntax wasn't parseable.
+    // Return a clear error instead of silently falling back to doSingleSelect.
+    return err(t('js_eng_implicit_join_failed'));
+  }
   return doSingleSelect(sql);
 }
 
@@ -751,11 +954,11 @@ function doExplicitJoin(sql) {
 
   const whereM = rm.match(/^where\s+(.+?)(?:\s+(?:group\s+by|order\s+by|having|limit)\b|$)/i);
   if (whereM) { where = whereM[1].trim(); rm = rm.slice(whereM[0].length).trim(); }
-  const grpM = rm.match(/^group\s+by\s+([\w,\s]+?)(?=\s+(?:having|order\s+by|limit)\b|$)/i);
+  const grpM = rm.match(/^group\s+by\s+([\w.,\s]+?)(?=\s+(?:having|order\s+by|limit)\b|$)/i);
   if (grpM) { grpBy = grpM[1]; rm = rm.slice(grpM[0].length).trim(); }
   const havM = rm.match(/^having\s+(.+?)(?:\s+(?:order\s+by|limit)\b|$)/i);
   if (havM) { having = havM[1].trim(); rm = rm.slice(havM[0].length).trim(); }
-  const ordM = rm.match(/^order\s+by\s+(\S+)(?:\s+(asc|desc))?/i);
+  const ordM = rm.match(/^order\s+by\s+(.+?)(?=\s+limit\b|$)/i);
   if (ordM) { orderBy = ordM[1] + (ordM[2] ? ' '+ordM[2] : ''); rm = rm.slice(ordM[0].length).trim(); }
   const limM = rm.match(/^limit\s+(\d+)/i);
   if (limM) { limit = Number(limM[1]); }
@@ -858,62 +1061,10 @@ function doExplicitJoin(sql) {
     if (whereErr) return err(`Ongeldige WHERE-conditie: ${esc(where)}. Controleer kolomnamen.`);
   }
 
-  // Apply GROUP BY + COUNT(*) / aggregates + HAVING
+  // Apply GROUP BY + aggregates + HAVING (ARCH-3+4: uses shared functions)
   if (grpBy) {
-    const grpKey = grpBy.replace(/^\w+\./, '');
-    const grps = {};
-    rows.forEach(r => {
-      const k = resolveCol(grpBy, r) ?? resolveCol(grpKey, r) ?? 'NULL';
-      if (!grps[k]) grps[k] = [];
-      grps[k].push(r);
-    });
-    // Build result rows with aggregates
-    const colParts = colStr.split(',').map(c => c.trim());
-    rows = Object.entries(grps).map(([k, grpRows]) => {
-      const out = {};
-      colParts.forEach(p => {
-        const cntM = p.match(/count\s*\(\s*\*\s*\)/i);
-        const aggM = p.match(/^(AVG|SUM|MAX|MIN)\s*\(\s*(\S+?)\s*\)(?:\s+as\s+(\w+))?$/i);
-        const aliasM = p.match(/^(\S+)\s+as\s+(\w+)$/i);
-        if (cntM) {
-          out['COUNT(*)'] = grpRows.length;
-        } else if (aggM) {
-          const fn = aggM[1].toUpperCase(), col = aggM[2], alias = aggM[3];
-          const vals = grpRows.map(r => Number(resolveCol(col,r))).filter(v => !isNaN(v));
-          let v;
-          switch(fn) {
-            case 'AVG': v = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2) : null; break;
-            case 'SUM': v = vals.reduce((a,b)=>a+b,0).toFixed(2); break;
-            case 'MAX': v = vals.length ? Math.max(...vals) : null; break;
-            case 'MIN': v = vals.length ? Math.min(...vals) : null; break;
-          }
-          out[alias || `${fn}(${col})`] = v;
-        } else {
-          const bare = p.replace(/^\w+\./, '');
-          const alias = aliasM ? aliasM[2] : null;
-          out[alias || bare] = resolveCol(p, grpRows[0]) ?? resolveCol(bare, grpRows[0]) ?? k;
-        }
-      });
-      return out;
-    });
-
-    // HAVING filter — supports COUNT(*), AVG(col), SUM(col), MAX(col), MIN(col)
-    if (having) {
-      const hm = having.match(/(count\s*\(\s*\*\s*\)|(?:AVG|SUM|MAX|MIN)\s*\(\s*\w+\s*\))\s*(>|<|>=|<=|=|!=)\s*([\d.]+)/i);
-      if (hm) {
-        const havExprRaw = hm[1].toUpperCase().replace(/\s+/g,''), op = hm[2], n = Number(hm[3]);
-        rows = rows.filter(r => {
-          // Find matching key: exact match first, then partial, then COUNT(*) fallback
-          let key = Object.keys(r).find(k => k.toUpperCase().replace(/\s+/g,'') === havExprRaw);
-          if(!key) key = Object.keys(r).find(k => k.toUpperCase().replace(/\s+/g,'').includes(havExprRaw));
-          if(!key && havExprRaw.includes('COUNT')) key = Object.keys(r).find(k => k === 'COUNT(*)');
-          if(key === undefined) return true;
-          const v = Number(r[key]);
-          switch(op){ case'>':return v>n; case'<':return v<n; case'>=':return v>=n; case'<=':return v<=n; case'=':return v==n; case'!=':return v!=n; }
-          return true;
-        });
-      }
-    }
+    const { gRows, colParts } = applyGroupBy(rows, grpBy, colStr, resolveCol);
+    rows = applyHaving(gRows, having, colParts);
   } else {
     // Project columns (no GROUP BY) — uses shared splitColParts and evalCase
     if (colStr.trim() !== '*') {
@@ -934,16 +1085,8 @@ function doExplicitJoin(sql) {
     }
   }
 
-  // ORDER BY
-  if (orderBy) {
-    const [col, dir] = orderBy.trim().split(/\s+/);
-    const bare = col.replace(/^\w+\./, '');
-    const asc = !dir || dir.toUpperCase() === 'ASC';
-    rows.sort((a,b) => {
-      const av = a[bare]??a[col], bv = b[bare]??b[col];
-      if(av<bv) return asc?-1:1; if(av>bv) return asc?1:-1; return 0;
-    });
-  }
+  // ORDER BY (multi-column)
+  if (orderBy) applyMultiSort(rows, orderBy);
 
   // LIMIT
   if (limit) rows = rows.slice(0, limit);
@@ -952,31 +1095,62 @@ function doExplicitJoin(sql) {
 }
 
 function doSingleSelect(sql) {
-  // Step-by-step clause parser replaces the former single mega-regex, which failed
-  // silently on edge cases such as column names that coincide with SQL keywords.
-  // Each clause is extracted in reverse order so that later clauses don't confuse
-  // the earlier ones (e.g. ORDER BY inside a string literal in WHERE).
+  // Quote-aware clause splitter: finds the LAST unquoted occurrence of each
+  // clause keyword so that strings like WHERE naam = 'pending order' don't
+  // trigger a false ORDER BY match. Aligned with doUpdate's scanning approach.
   let rest = sql;
+
+  // Helper: find the last unquoted position of a keyword pattern (case-insensitive)
+  function findLastUnquoted(str, kwRe) {
+    let inStr = false, sc = '', last = -1;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (!inStr && (ch === "'" || ch === '"')) { inStr = true; sc = ch; continue; }
+      if (inStr && ch === sc && str[i-1] !== '\\') { inStr = false; continue; }
+      if (!inStr && kwRe.test(str.slice(i))) { last = i; }
+    }
+    return last;
+  }
 
   // LIMIT
   let limit = null;
-  rest = rest.replace(/\s+limit\s+(\d+)\s*$/i, (_, n) => { limit = Number(n); return ''; }).trim();
+  const limIdx = findLastUnquoted(rest, /^limit\s+\d+\s*$/i);
+  if (limIdx !== -1) {
+    const limM = rest.slice(limIdx).match(/^limit\s+(\d+)\s*$/i);
+    if (limM) { limit = Number(limM[1]); rest = rest.slice(0, limIdx).trim(); }
+  }
 
   // ORDER BY
   let orderBy = null;
-  rest = rest.replace(/\s+order\s+by\s+([\w.]+(?:\s+(?:asc|desc))?)\s*$/i, (_, ob) => { orderBy = ob.trim(); return ''; }).trim();
+  const ordIdx = findLastUnquoted(rest, /^order\s+by\s+/i);
+  if (ordIdx !== -1) {
+    orderBy = rest.slice(ordIdx).replace(/^order\s+by\s+/i, '').trim();
+    rest = rest.slice(0, ordIdx).trim();
+  }
 
   // HAVING
   let having = null;
-  rest = rest.replace(/\s+having\s+(.+?)\s*$/i, (_, h) => { having = h.trim(); return ''; }).trim();
+  const havIdx = findLastUnquoted(rest, /^having\s+/i);
+  if (havIdx !== -1) {
+    having = rest.slice(havIdx).replace(/^having\s+/i, '').trim();
+    rest = rest.slice(0, havIdx).trim();
+  }
 
   // GROUP BY
   let grpBy = null;
-  rest = rest.replace(/\s+group\s+by\s+([\w,\s]+?)\s*$/i, (_, g) => { grpBy = g.trim(); return ''; }).trim();
+  const grpIdx = findLastUnquoted(rest, /^group\s+by\s+/i);
+  if (grpIdx !== -1) {
+    grpBy = rest.slice(grpIdx).replace(/^group\s+by\s+/i, '').trim();
+    rest = rest.slice(0, grpIdx).trim();
+  }
 
-  // WHERE — stop before GROUP/ORDER/HAVING/LIMIT which were already stripped
+  // WHERE
   let where = null;
-  rest = rest.replace(/\s+where\s+(.+?)\s*$/i, (_, w) => { where = w.trim(); return ''; }).trim();
+  const whereIdx = findLastUnquoted(rest, /^where\s+/i);
+  if (whereIdx !== -1) {
+    where = rest.slice(whereIdx).replace(/^where\s+/i, '').trim();
+    rest = rest.slice(0, whereIdx).trim();
+  }
 
   // SELECT … FROM table [alias]
   const selFromM = rest.match(/^select\s+(.*?)\s+from\s+(\w+)(?:\s+(?:as\s+)?(\w+))?\s*$/i);
@@ -1024,55 +1198,10 @@ function doSingleSelect(sql) {
   }
 
   if(grpBy) {
-    // Full GROUP BY: support COUNT(*), AVG, SUM, MAX, MIN
-    const grps = {};
-    rows.forEach(r => { const k = r[grpBy] ?? 'NULL'; if (!grps[k]) grps[k] = []; grps[k].push(r); });
-    const colParts = colStr.split(',').map(c => c.trim());
-    let gRows = Object.entries(grps).map(([k, grpRows]) => {
-      const out = {};
-      colParts.forEach(p => {
-        const aliasM = p.match(/^(.+?)\s+as\s+(\w+)$/i);
-        const expr = aliasM ? aliasM[1].trim() : p;
-        const label = aliasM ? aliasM[2] : expr;
-        if (/^count\s*\(\s*\*\s*\)$/i.test(expr)) {
-          out[label] = grpRows.length;
-        } else {
-          const aggM = expr.match(/^(AVG|SUM|MAX|MIN)\s*\(\s*(\w+)\s*\)$/i);
-          if (aggM) {
-            const fn = aggM[1].toUpperCase(), col = aggM[2];
-            const vals = grpRows.map(r => Number(r[col])).filter(v => !isNaN(v));
-            switch(fn) {
-              case 'AVG': out[label] = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2) : null; break;
-              case 'SUM': out[label] = vals.reduce((a,b)=>a+b,0).toFixed(2); break;
-              case 'MAX': out[label] = vals.length ? Math.max(...vals) : null; break;
-              case 'MIN': out[label] = vals.length ? Math.min(...vals) : null; break;
-            }
-          } else {
-            // Plain column (the GROUP BY key)
-            out[label] = grpRows[0][expr] ?? k;
-          }
-        }
-      });
-      return out;
-    });
-    if(having) {
-      // Support: COUNT(*) > n, AVG(col) > n, SUM(col) > n etc
-      const hm = having.match(/(count\s*\(\s*\*\s*\)|(?:AVG|SUM|MAX|MIN)\s*\(\s*\w+\s*\))\s*(>|<|>=|<=|=|!=)\s*([\d.]+)/i);
-      if(hm) {
-        const havExprRaw = hm[1].toUpperCase().replace(/\s+/g,''), op = hm[2], n = Number(hm[3]);
-        gRows = gRows.filter(r => {
-          // Find matching key: exact match first, then partial, then COUNT(*) fallback
-          let key = Object.keys(r).find(k => k.toUpperCase().replace(/\s+/g,'') === havExprRaw);
-          if(!key) key = Object.keys(r).find(k => k.toUpperCase().replace(/\s+/g,'').includes(havExprRaw));
-          if(!key && havExprRaw.includes('COUNT')) key = Object.keys(r).find(k => k === 'COUNT(*)');
-          if(key === undefined) return true;
-          const v = Number(r[key]);
-          switch(op){case'>':return v>n;case'<':return v<n;case'>=':return v>=n;case'<=':return v<=n;case'=':return v==n;case'!=':return v!=n;}
-          return true;
-        });
-      }
-    }
-    if(orderBy){const[col2,dir]=orderBy.trim().split(/\s+/);const asc=!dir||dir.toUpperCase()==='ASC';gRows.sort((a,b)=>{const av=a[col2]??a[col2.replace(/^\w+\./,'')],bv=b[col2]??b[col2.replace(/^\w+\./,'')];if(av<bv)return asc?-1:1;if(av>bv)return asc?1:-1;return 0;});}
+    // ARCH-3+4: uses shared applyGroupBy + applyHaving
+    const { gRows: _gRows, colParts } = applyGroupBy(rows, grpBy, colStr);
+    let gRows = applyHaving(_gRows, having, colParts);
+    if(orderBy) applyMultiSort(gRows, orderBy);
     if(limit) gRows=gRows.slice(0,Number(limit));
     return {ok:true,type:'select',rows:gRows};
   }
@@ -1088,7 +1217,7 @@ function doSingleSelect(sql) {
     rows = rows.map(r=>{const o={};cols2.forEach(c=>{if(r[c]!==undefined)o[c]=r[c];});return o;});
     const seen2 = new Set();
     rows = rows.filter(r=>{const k=JSON.stringify(r);if(seen2.has(k))return false;seen2.add(k);return true;});
-    if(orderBy){const[col,dir]=orderBy.trim().split(/\s+/);const asc=!dir||dir.toUpperCase()==='ASC';rows.sort((a,b)=>{if(a[col]<b[col])return asc?-1:1;if(a[col]>b[col])return asc?1:-1;return 0;});}
+    if(orderBy) applyMultiSort(rows, orderBy);
     if(limit) rows=rows.slice(0,Number(limit));
     return {ok:true,type:'select',rows,tbl};
   }
@@ -1112,39 +1241,52 @@ function doSingleSelect(sql) {
       return o;
     });
   }
-  if(orderBy){
-    const[col,dir]=orderBy.trim().split(/\s+/);
-    const bare=col.replace(/^\w+\./,'');
-    const asc=!dir||dir.toUpperCase()==='ASC';
-    rows.sort((a,b)=>{
-      const av=a[bare]??a[col], bv=b[bare]??b[col];
-      if(av<bv)return asc?-1:1;if(av>bv)return asc?1:-1;return 0;
-    });
-  }
+  if(orderBy) applyMultiSort(rows, orderBy);
   if(limit) rows=rows.slice(0,Number(limit));
   return {ok:true,type:'select',rows,tbl};
 }
 
 function doJoin(sql) {
-  const m=sql.match(/select\s+(.*?)\s+from\s+([\w\s,]+?)(?:\s+where\s+(.+?))?(?:\s+order\s+by\s+(.+?))?(?:\s+limit\s+(\d+))?$/i);
+  // BUG-6 fix: added GROUP BY and HAVING support to implicit join handler.
+  const m=sql.match(/select\s+(.*?)\s+from\s+([\w\s,]+?)(?:\s+where\s+(.+?))?(?:\s+group\s+by\s+([\w.,\s]+?))?(?:\s+having\s+(.+?))?(?:\s+order\s+by\s+(.+?))?(?:\s+limit\s+(\d+))?$/i);
   if(!m) return null;
-  let[,colStr,tblStr,where,orderBy,limit]=m;
-  const tbls=tblStr.split(',').map(t=>{const p=t.trim().split(/\s+/);return{name:p[0].toLowerCase(),alias:p[1]||p[0].toLowerCase()};});
-  for(const t of tbls) if(!DB[t.name]) return null;
+  let[,colStr,tblStr,where,grpBy,having,orderBy,limit]=m;
+  if (grpBy) grpBy = grpBy.trim();
+  if (having) having = having.trim();
+  const tbls=tblStr.split(',').map(tb=>{const p=tb.trim().split(/\s+/);return{name:p[0].toLowerCase(),alias:p[1]||p[0].toLowerCase()};});
+  for(const tb of tbls) if(!DB[tb.name]) return null;
   let rows=DB[tbls[0].name].rows.map(r=>{const o={};Object.keys(r).forEach(k=>o[tbls[0].alias+'.'+k]=r[k]);return o;});
-  for(let i=1;i<tbls.length;i++){const t=tbls[i];const nr=[];rows.forEach(ex=>{DB[t.name].rows.forEach(r=>{const c={...ex};Object.keys(r).forEach(k=>c[t.alias+'.'+k]=r[k]);nr.push(c);});});rows=nr;}
+  for(let i=1;i<tbls.length;i++){const tb=tbls[i];const nr=[];rows.forEach(ex=>{DB[tb.name].rows.forEach(r=>{const c={...ex};Object.keys(r).forEach(k=>c[tb.alias+'.'+k]=r[k]);nr.push(c);});});rows=nr;}
   if(where) {
     let whereErr = null;
     rows = rows.filter(r => { try { return evalWhereJoin(r, where); } catch(e) { whereErr = e; return false; } });
     if (whereErr) return err(ti('js_eng_invalid_where_join', {clause: esc(where.trim())}));
   }
+
+  // Resolve column ref in join context (alias.col or bare col)
+  function resolveCol(ref, row) {
+    if (row[ref] !== undefined) return row[ref];
+    const bare = ref.replace(/^\w+\./, '');
+    const key = Object.keys(row).find(k => k === bare || k.endsWith('.'+bare));
+    return key !== undefined ? row[key] : undefined;
+  }
+
+  if (grpBy) {
+    // ARCH-3+4: uses shared applyGroupBy + applyHaving
+    const { gRows: _gRows, colParts } = applyGroupBy(rows, grpBy, colStr, resolveCol);
+    let gRows = applyHaving(_gRows, having, colParts);
+    if(orderBy) applyMultiSort(gRows, orderBy);
+    if(limit) gRows=gRows.slice(0,Number(limit));
+    return {ok:true,type:'select',rows:gRows};
+  }
+
   let proj;
   if(colStr.trim()==='*'){proj=rows;}
   else{
     const cols=colStr.split(',').map(c=>{const[raw,al]=c.trim().split(/\s+as\s+/i);return{raw:raw.trim(),al:al||null};});
     proj=rows.map(r=>{const o={};cols.forEach(({raw,al})=>{let v=r[raw];if(v===undefined){const bare=raw.replace(/^\w+\./,'');const key=Object.keys(r).find(k=>k.endsWith('.'+bare));v=key?r[key]:undefined;}o[al||raw.replace(/^\w+\./,'')]=v;});return o;});
   }
-  if(orderBy){const[col,dir]=orderBy.trim().split(/\s+/);const asc=!dir||dir.toUpperCase()==='ASC';const bare=col.replace(/^\w+\./,'');proj.sort((a,b)=>{const av=a[bare]??a[col],bv=b[bare]??b[col];if(av<bv)return asc?-1:1;if(av>bv)return asc?1:-1;return 0;});}
+  if(orderBy) applyMultiSort(proj, orderBy);
   if(limit) proj=proj.slice(0,Number(limit));
   return {ok:true,type:'select',rows:proj};
 }
@@ -1161,7 +1303,23 @@ function doInsert(sql) {
   cols.forEach((c,i)=>row[c]=vals[i]);
   for(const col of tblData.cols.filter(c=>c.nn&&!c.pk)){if(row[col.n]===undefined||row[col.n]==='')return err(ti('js_eng_col_not_null', {col: esc(col.n)}));}
   for(const col of tblData.cols.filter(c=>c.uq)){if(tblData.rows.some(r=>r[col.n]===row[col.n]))return err(ti('js_eng_unique_exists', {val: esc(row[col.n]), col: esc(col.n)}));}
+  // Fix 5: FK validation — warn (don't block) when a foreign key value has no match.
+  // Educational: reinforces referential integrity concepts without preventing the INSERT.
+  const fkWarnings = [];
+  for (const col of tblData.cols.filter(c => c.fk)) {
+    const val = row[col.n];
+    if (val == null) continue;
+    // Heuristic: col_name "xxx_id" → referenced table "xxx" with PK "xxx_id"
+    const refTbl = col.n.replace(/_id$/, '');
+    if (DB[refTbl]) {
+      const refPk = DB[refTbl].cols.find(c => c.pk);
+      if (refPk && !DB[refTbl].rows.some(r => r[refPk.n] === val)) {
+        fkWarnings.push(ti('js_eng_fk_warning', {val: esc(val), col: esc(col.n), tbl: esc(refTbl)}));
+      }
+    }
+  }
   tblData.rows.push(row);
+  if (fkWarnings.length) fkWarnings.forEach(w => UI.addEvent('warn', w));
   UI.addEvent('ok', ti('js_eng_insert_event', {tbl: esc(tbl), id: row[pk?.n]||''}));
   UI.refreshUI();
   return {ok:true,type:'insert',affectedRows:1,rowId:row[pk?.n]};

@@ -244,63 +244,45 @@ function smartRunMsg(sql) {
   return res;
 }
 
+// Fix 7: Post-execution DB state verification helper.
+// Runs SQL via smartRunMsg, then verifies that the expected row state exists.
+// tbl: table name, pkCol: primary key column, pkVal: PK value to find,
+// checks: {col: expectedValue, ...} — each must match.
+// Returns the smartRunMsg result if all checks pass, or an error if the
+// query ran successfully but left the DB in the wrong state.
+function smartRunAndVerify(sql, tbl, pkCol, pkVal, checks) {
+  const res = smartRunMsg(sql);
+  if (!res.ok) return res;
+  const row = DB[tbl]?.rows.find(r => r[pkCol] === pkVal);
+  if (!row) return err(ti('js_chk_row_not_found', {tbl: esc(tbl), col: esc(pkCol), val: esc(String(pkVal))}));
+  for (const [col, expected] of Object.entries(checks)) {
+    // Loose comparison: coerce both to number if possible, else compare as strings
+    const actual = row[col];
+    const numExpected = Number(expected);
+    const numActual = Number(actual);
+    const match = (!isNaN(numExpected) && !isNaN(numActual))
+      ? numActual === numExpected
+      : String(actual).toLowerCase() === String(expected).toLowerCase();
+    if (!match) {
+      return err(ti('js_chk_wrong_value', {col: esc(col), expected: esc(String(expected)), actual: esc(String(actual))}));
+    }
+  }
+  return res;
+}
+
 // ── CONCEPT SCAFFOLDING ──────────────────────────────────────────────
 // Mini-uitleg die verschijnt bij het EERSTE gebruik van een nieuw concept
+// I18N-2 fix: uses t() keys so English users see English explanations.
 const CONCEPT_INTRO = {
-  select: {
-    icon: '🔍',
-    title: 'SELECT — Gegevens opvragen',
-    body: 'Met <strong>SELECT</strong> haal je rijen op uit een tabel. De basisvorm is:<br><code>SELECT kolom1, kolom2 FROM tabel WHERE conditie</code><br>Gebruik <code>*</code> voor alle kolommen.',
-    tip: 'De volgorde is altijd: SELECT → FROM → WHERE → ORDER BY → LIMIT',
-  },
-  insert: {
-    icon: '➕',
-    title: 'INSERT — Nieuwe rij toevoegen',
-    body: 'Met <strong>INSERT INTO</strong> voeg je een nieuwe rij toe.<br><code>INSERT INTO tabel (kolom1, kolom2) VALUES (waarde1, waarde2)</code><br>Tekst staat altijd tussen enkele aanhalingstekens.',
-    tip: 'Vermeld de kolomnamen expliciet — dan hoef je de volgorde in de tabel niet te kennen.',
-  },
-  update: {
-    icon: '✏️',
-    title: 'UPDATE — Bestaande rij wijzigen',
-    body: 'Met <strong>UPDATE … SET … WHERE</strong> pas je bestaande rijen aan.<br><code>UPDATE tabel SET kolom = nieuwewaarde WHERE conditie</code>',
-    tip: '⚠️ Altijd WHERE gebruiken! Zonder WHERE pas je ALLE rijen tegelijk aan.',
-  },
-  delete: {
-    icon: '🗑️',
-    title: 'DELETE — Rij(en) verwijderen',
-    body: 'Met <strong>DELETE FROM … WHERE</strong> verwijder je rijen.<br><code>DELETE FROM tabel WHERE conditie</code>',
-    tip: '⚠️ DELETE is onomkeerbaar. Overweeg UPDATE SET actief = 0 als alternatief.',
-  },
-  ddl: {
-    icon: '🏗️',
-    title: 'DDL — Database structuur aanpassen',
-    body: 'DDL-commando\'s (Data Definition Language) wijzigen de <em>structuur</em> van de database, niet de data zelf.<br><code>CREATE TABLE naam (kolom datatype, ...)</code><br><code>ALTER TABLE naam ADD COLUMN kolom datatype</code>',
-    tip: 'Bestaande rijen krijgen automatisch NULL voor een nieuwe kolom via ALTER TABLE.',
-  },
-  like: {
-    icon: '🔎',
-    title: 'LIKE — Zoeken op patroon',
-    body: 'Met <strong>LIKE</strong> filter je op een tekstpatroon.<br><code>WHERE naam LIKE \'%Jan%\'</code> — bevat "Jan"<br><code>WHERE naam LIKE \'J%\'</code> — begint met J<br><code>WHERE email LIKE \'%@gmail%\'</code> — Gmail-adressen',
-    tip: '% staat voor nul of meer willekeurige tekens. _ staat voor precies één teken.',
-  },
-  between: {
-    icon: '📏',
-    title: 'BETWEEN — Bereikfilter',
-    body: 'Met <strong>BETWEEN a AND b</strong> filter je op een bereik — inclusief de grenzen zelf.<br><code>WHERE prijs BETWEEN 10 AND 50</code><br>Werkt ook voor datums: <code>WHERE datum BETWEEN \'2024-01-01\' AND \'2024-12-31\'</code>',
-    tip: 'BETWEEN a AND b is gelijk aan: WHERE kolom >= a AND kolom <= b',
-  },
-  isnull: {
-    icon: '🕳️',
-    title: 'IS NULL — Ontbrekende waarden',
-    body: 'NULL is de <em>afwezigheid</em> van een waarde. Je kan er NIET op vergelijken met =.<br><code>WHERE kolom IS NULL</code> — geen waarde ingevuld<br><code>WHERE kolom IS NOT NULL</code> — waarde wél ingevuld<br>❌ <code>WHERE kolom = NULL</code> werkt nooit!',
-    tip: 'Anti-join: LEFT JOIN + WHERE rechtertabel.id IS NULL → vindt rijen die NIET in de rechtertabel staan.',
-  },
-  casewhen: {
-    icon: '🏷️',
-    title: 'CASE WHEN — Conditionele labels',
-    body: 'Met <strong>CASE WHEN</strong> maak je een nieuwe kolom op basis van condities — als een if/else in SQL.<br><code>CASE WHEN stock = 0 THEN \'Uitverkocht\' WHEN stock &lt; 5 THEN \'Bijna op\' ELSE \'Op voorraad\' END AS status</code>',
-    tip: 'Sluit altijd af met END. Geef de kolom een naam via AS. Gebruik ELSE als standaardwaarde.',
-  },
+  select:   { icon: '🔍', get title(){ return t('ci_select_title'); },   get body(){ return t('ci_select_body'); },   get tip(){ return t('ci_select_tip'); } },
+  insert:   { icon: '➕', get title(){ return t('ci_insert_title'); },   get body(){ return t('ci_insert_body'); },   get tip(){ return t('ci_insert_tip'); } },
+  update:   { icon: '✏️', get title(){ return t('ci_update_title'); },   get body(){ return t('ci_update_body'); },   get tip(){ return t('ci_update_tip'); } },
+  delete:   { icon: '🗑️', get title(){ return t('ci_delete_title'); },   get body(){ return t('ci_delete_body'); },   get tip(){ return t('ci_delete_tip'); } },
+  ddl:      { icon: '🏗️', get title(){ return t('ci_ddl_title'); },      get body(){ return t('ci_ddl_body'); },      get tip(){ return t('ci_ddl_tip'); } },
+  like:     { icon: '🔎', get title(){ return t('ci_like_title'); },     get body(){ return t('ci_like_body'); },     get tip(){ return t('ci_like_tip'); } },
+  between:  { icon: '📏', get title(){ return t('ci_between_title'); },  get body(){ return t('ci_between_body'); },  get tip(){ return t('ci_between_tip'); } },
+  isnull:   { icon: '🕳️', get title(){ return t('ci_isnull_title'); },   get body(){ return t('ci_isnull_body'); },   get tip(){ return t('ci_isnull_tip'); } },
+  casewhen: { icon: '🏷️', get title(){ return t('ci_casewhen_title'); }, get body(){ return t('ci_casewhen_body'); }, get tip(){ return t('ci_casewhen_tip'); } },
 };
 
 // Track welke concepten de speler al gezien heeft
@@ -394,12 +376,12 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO klant (kolommen) VALUES (waarden).'));
-     if(!s.includes('klant')) return err('Vergeet de tabelnaam niet: INSERT INTO <strong>klant</strong> (...)');
-     if(!s.includes('sophie')) return err('Naam "Sophie Vermeersch" ontbreekt in de VALUES.');
-     if(!s.includes('sophie@mail.be')) return err('E-mailadres "sophie@mail.be" ontbreekt in de VALUES.');
-     if(!s.includes('gent')) return err('Stad "Gent" ontbreekt.');
-     if(missingQuotes(sql,'sophie vermeersch')) return err('Tekst moet tussen aanhalingstekens: <code>\'Sophie Vermeersch\'</code>');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_new_customer_1')));
+     if(!s.includes('klant')) return err(t('chk_new_customer_2'));
+     if(!s.includes('sophie')) return err(t('chk_new_customer_3'));
+     if(!s.includes('sophie@mail.be')) return err(t('chk_new_customer_4'));
+     if(!s.includes('gent')) return err(t('chk_new_customer_5'));
+     if(missingQuotes(sql,'sophie vermeersch')) return err(t('chk_new_customer_6'));
      const res=runSQL(sql); if(!res.ok) return res;
      return {ok:true,type:'insert',msg:'Sophie Vermeersch toegevoegd!'};
    },
@@ -413,12 +395,12 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err(stripSolution('Gebruik UPDATE product SET prijs = ... WHERE ...'));
-     if(!s.includes('product')) return err('Tabel moet <strong>product</strong> zijn.');
-     if(!s.includes('where')) return err('⚠️ WHERE vergeten! Zonder WHERE pas je ALLE producten aan.');
-     if(!s.includes('44.99')&&!s.includes('44,99')) return err('Nieuwe prijs is <strong>44.99</strong>. Gebruik een punt als decimaalteken.');
-     if(!s.includes('product_id')&&!s.includes('= 2')) return err('Voeg een <strong>WHERE</strong>-clausule toe om slechts één product bij te werken.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(stripSolution(t('chk_price_update_1')));
+     if(!s.includes('product')) return err(t('chk_price_update_2'));
+     if(!s.includes('where')) return err(t('chk_price_update_3'));
+     if(!s.includes('44.99')&&!s.includes('44,99')) return err(t('chk_price_update_4'));
+     if(!s.includes('product_id')&&!s.includes('= 2')) return err(t('chk_price_update_5'));
+     return smartRunAndVerify(sql, 'product', 'product_id', 2, {prijs: 44.99});
    },
    win:'Prijs bijgewerkt. Geen verlies meer. 💶'},
 
@@ -431,13 +413,13 @@ const SCENARIOS = [
    validation: { expectedColumns: ['naam','email'], orderedBy: { column: 'naam', direction: 'asc' }, forbiddenColumns: ['klant_id','actief'] },
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT.');
-     if(!s.includes('from klant')) return err('Gebruik FROM klant (niet FROM product of andere tabel).');
-     if(!s.includes('gent')) return err("Filter op stad = 'Gent'. Let op: tekst moet tussen aanhalingstekens!");
-     if(!s.includes("'gent'")&&!s.includes('"gent"')&&s.includes('gent')) return err("Schrijf Gent tussen aanhalingstekens: WHERE stad = <code>'Gent'</code>");
+     if(!s.startsWith('select')) return err(t('chk_query_gent_1'));
+     if(!s.includes('from klant')) return err(t('chk_query_gent_2'));
+     if(!s.includes('gent')) return err(t('chk_query_gent_3'));
+     if(!s.includes("'gent'")&&!s.includes('"gent"')&&s.includes('gent')) return err(t('chk_query_gent_4'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err("Geen resultaten gevonden. Controleer de schrijfwijze van 'Gent'.");
+     if(!rowCount(res)) return err(t('chk_query_gent_5'));
      return res;
    },
    win:'Lijst verstuurd! Campagne gelanceerd. 📣'},
@@ -450,13 +432,13 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(s.startsWith('delete')) return err('❌ NIET VERWIJDEREN! GDPR verplicht bewaarplicht van klantdata. Gebruik UPDATE om de klant te deactiveren.');
-     if(!s.startsWith('update')) return err(stripSolution('Gebruik UPDATE klant SET actief = 0 WHERE klant_id = 4'));
-     if(!s.includes('klant')) return err('Tabel is <strong>klant</strong>, niet product of bestelling.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders deactiveer je ALLE klanten.');
-     if(!s.includes('4')&&!s.includes('kobe')) return err('Voeg een WHERE-clausule toe om de juiste klant te filteren.');
-     if(!s.includes('actief')) return err('Gebruik SET om de actief-kolom op de juiste waarde te zetten.');
-     return smartRunMsg(sql);
+     if(s.startsWith('delete')) return err(t('chk_deactivate_gdpr_1'));
+     if(!s.startsWith('update')) return err(stripSolution(t('chk_deactivate_gdpr_2')));
+     if(!s.includes('klant')) return err(t('chk_deactivate_gdpr_3'));
+     if(!s.includes('where')) return err(t('chk_deactivate_gdpr_4'));
+     if(!s.includes('4')&&!s.includes('kobe')) return err(t('chk_deactivate_gdpr_5'));
+     if(!s.includes('actief')) return err(t('chk_deactivate_gdpr_6'));
+     return smartRunAndVerify(sql, 'klant', 'klant_id', 4, {actief: 0});
    },
    win:'Kobe gedeactiveerd. GDPR correct nageleefd. ✅'},
 
@@ -468,11 +450,12 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO product (...) VALUES (...)'));
-     if(!s.includes('product')) return err('Tabel is <strong>product</strong>.');
-     if(!s.includes('lamp')&&!s.includes('staande')) return err('Naam "Staande Lamp LED" ontbreekt in VALUES.');
-     if(!s.includes('89.99')) return err('Prijs moet <strong>89.99</strong> zijn (punt als decimaalteken).');
-     if(!s.includes('wonen')) return err('Categorie "Wonen" ontbreekt.');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_new_product_1')));
+     if(!s.includes('product')) return err(t('chk_new_product_2'));
+     if(!s.includes('lamp')&&!s.includes('staande')) return err(t('chk_new_product_3'));
+     if(!s.includes('89.99')) return err(t('chk_new_product_4'));
+     if(!s.includes('wonen')) return err(t('chk_new_product_5'));
+     if(missingQuotes(sql,'Staande Lamp LED')||missingQuotes(sql,'Wonen')) return err(t('chk_missing_quotes'));
      const res=runSQL(sql); if(!res.ok) return res;
      return {ok:true,type:'insert',msg:'Staande Lamp LED toegevoegd!'};
    },
@@ -487,13 +470,13 @@ const SCENARIOS = [
    validation: { expectedColumns: ['naam','email','stad'], orderedBy: { column: 'naam', direction: 'asc' } },
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, ... FROM klant WHERE actief = 1'));
-     if(!s.includes('from klant')) return err('Gebruik FROM klant.');
-     if(!s.includes('actief')) return err('Filter op de kolom <strong>actief</strong> om alleen actieve klanten te tonen.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_active_customers_1')));
+     if(!s.includes('from klant')) return err(t('chk_active_customers_2'));
+     if(!s.includes('actief')) return err(t('chk_active_customers_3'));
      const res = runSQL(sql);
      if(!res.ok) return res;
      if(res.rows && res.rows.some(r=>String(r.actief)==='0'||r.actief===0||r.actief===false))
-       return err('Je haalt te veel klanten op. Filter op de <strong>actief</strong>-kolom om alleen actieve klanten te tonen.');
+       return err(t('chk_active_customers_4'));
      return res;
    },
    win:'Actieve klantenlijst klaar! Campagne kan starten. 📣'},
@@ -506,9 +489,9 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT COUNT(*) FROM product'));
-     if(!s.includes('count')) return err(stripSolution('Gebruik <strong>COUNT(*)</strong> om te tellen. Voorbeeld: SELECT COUNT(*) FROM product'));
-     if(!s.includes('product')) return err('Tel producten: gebruik FROM <strong>product</strong>.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_count_products_1')));
+     if(!s.includes('count')) return err(stripSolution(t('chk_count_products_2')));
+     if(!s.includes('product')) return err(t('chk_count_products_3'));
      return smartRunMsg(sql);
    },
    win:'Productaantal geteld. Voorraadrapport klaar! 📊'},
@@ -522,12 +505,12 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err('Gebruik UPDATE kortingscode SET actief = 0 WHERE code = \'FOUT999\'');
-     if(!s.includes('kortingscode')) return err('Tabel is <strong>kortingscode</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders deactiveer je ALLE kortingscodes.');
-     if(!s.includes('fout999')) return err("Filter op code = 'FOUT999'. Let op de aanhalingstekens rond de tekst.");
-     if(!s.includes('actief')) return err('Gebruik SET om de actief-kolom bij te werken.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(t('chk_disable_coupon_1'));
+     if(!s.includes('kortingscode')) return err(t('chk_disable_coupon_2'));
+     if(!s.includes('where')) return err(t('chk_disable_coupon_3'));
+     if(!s.includes('fout999')) return err(t('chk_disable_coupon_4'));
+     if(!s.includes('actief')) return err(t('chk_disable_coupon_5'));
+     return smartRunAndVerify(sql, 'kortingscode', 'code_id', 4, {actief: 0});
    },
    win:'Crisis bezworen! FOUT999 gedeactiveerd. 🎉'},
 
@@ -539,12 +522,12 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err(stripSolution('Gebruik UPDATE product SET stock = 20 WHERE product_id = 5'));
-     if(!s.includes('product')) return err('Tabel is <strong>product</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders pas je de stock van ALLE producten aan.');
-     if(!s.includes('stock')) return err('Gebruik <strong>SET</strong> om de stock-kolom bij te werken naar de gevraagde waarde');
-     if(!s.includes('5')&&!s.includes('webcam')) return err('Voeg een WHERE-clausule toe om enkel het gevraagde product te filteren.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(stripSolution(t('chk_restock_webcam_1')));
+     if(!s.includes('product')) return err(t('chk_restock_webcam_2'));
+     if(!s.includes('where')) return err(t('chk_restock_webcam_3'));
+     if(!s.includes('stock')) return err(t('chk_restock_webcam_4'));
+     if(!s.includes('5')&&!s.includes('webcam')) return err(t('chk_restock_webcam_5'));
+     return smartRunAndVerify(sql, 'product', 'product_id', 5, {stock: 20});
    },
    win:'Webcam HD terug in stock! 📷'},
 
@@ -556,10 +539,11 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO bestelling (...) VALUES (...)'));
-     if(!s.includes('bestelling')) return err('Tabel is <strong>bestelling</strong>.');
-     if(!s.includes('2024-12-01')) return err('Datum 2024-12-01 ontbreekt. Schrijf datums als <code>\'2024-12-01\'</code>');
-     if(!s.includes('verwerking')) return err('Status "verwerking" ontbreekt in VALUES.');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_new_order_1')));
+     if(!s.includes('bestelling')) return err(t('chk_new_order_2'));
+     if(!s.includes('2024-12-01')) return err(t('chk_new_order_3'));
+     if(!s.includes('verwerking')) return err(t('chk_new_order_4'));
+     if(missingQuotes(sql,'2024-12-01')||missingQuotes(sql,'verwerking')) return err(t('chk_missing_quotes'));
      const res=runSQL(sql); if(!res.ok) return res;
      return {ok:true,type:'insert',msg:'Bestelling verwerkt!'};
    },
@@ -574,11 +558,11 @@ const SCENARIOS = [
    validation: { expectedColumns: ['klant_id'], minRows: 1 },
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT klant_id, COUNT(*) FROM bestelling GROUP BY klant_id'));
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om bestellingen per klant te tellen.');
-     if(!s.includes('bestelling')) return err('Gebruik FROM <strong>bestelling</strong>.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per klant te groeperen.');
-     if(s.includes('where')&&!s.includes('group by')) return err('Tip: gebruik GROUP BY, niet WHERE, om te groeperen.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_count_orders_1')));
+     if(!s.includes('count')) return err(t('chk_count_orders_2'));
+     if(!s.includes('bestelling')) return err(t('chk_count_orders_3'));
+     if(!s.includes('group by')) return err(t('chk_count_orders_4'));
+     if(s.includes('where')&&!s.includes('group by')) return err(t('chk_count_orders_5'));
      return smartRunMsg(sql);
    },
    win:'Rapport klaar! Investeerders tevreden. 📈'},
@@ -591,12 +575,14 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err('Gebruik DELETE FROM bestelling WHERE datum < \'2024-11-12\'');
-     if(!s.includes('bestelling')) return err('Tabel is <strong>bestelling</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht bij DELETE! Zonder WHERE verwijder je ALLE bestellingen.');
-     if(!s.includes('datum')) return err('Filter op de kolom <strong>datum</strong>. Bestellingen vóór 2024-11-12 moeten weg.');
-     if(!s.includes('2024')) return err('Voeg de datum 2024-11-12 toe als grens: WHERE datum < \'2024-11-12\'');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(t('chk_delete_test_1'));
+     if(!s.includes('bestelling')) return err(t('chk_delete_test_2'));
+     if(!s.includes('where')) return err(t('chk_delete_test_3'));
+     if(!s.includes('datum')) return err(t('chk_delete_test_4'));
+     if(!s.includes('2024')) return err(t('chk_delete_test_5'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     if (DB.bestelling.rows.some(r => r.datum < '2024-11-12')) return err(t('chk_delete_test_6'));
+     return res;
    },
    win:'Testdata verwijderd. Database proper voor het fiscale jaar. 🧹'},
 
@@ -614,11 +600,11 @@ const SCENARIOS = [
        hint:'ALTER TABLE klant ADD COLUMN telefoon VARCHAR(20)',
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('alter')) return err('Begin met <strong>ALTER TABLE klant</strong>.');
-         if(!s.includes('klant')) return err('Pas tabel <strong>klant</strong> aan.');
-         if(!s.includes('add')) return err('Gebruik <strong>ADD COLUMN</strong> om een kolom toe te voegen.');
-         if(!s.includes('telefoon')) return err('De kolom heet <strong>telefoon</strong>.');
-         if(!s.includes('varchar')&&!s.includes('text')) return err('Gebruik <strong>VARCHAR(20)</strong> als datatype.');
+         if(!s.startsWith('alter')) return err(t('chk_add_telefoon_1'));
+         if(!s.includes('klant')) return err(t('chk_add_telefoon_2'));
+         if(!s.includes('add')) return err(t('chk_add_telefoon_3'));
+         if(!s.includes('telefoon')) return err(t('chk_add_telefoon_4'));
+         if(!s.includes('varchar')&&!s.includes('text')) return err(t('chk_add_telefoon_5'));
          const res=runSQL(sql); if(!res.ok) return res;
          return {ok:true,type:'ddl',msg:'Kolom telefoon toegevoegd! Alle klanten hebben nu telefoon = NULL.'};
        },
@@ -631,10 +617,10 @@ const SCENARIOS = [
        hint:'SELECT naam, email\nFROM klant\nWHERE telefoon IS NULL',
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('select')) return err('Begin met <strong>SELECT naam, email FROM klant</strong>.');
-         if(!s.includes('telefoon')) return err('Filter op de kolom <strong>telefoon</strong>.');
-         if(s.includes('= null')||s.includes('=null')) return err('❌ <code>= NULL</code> werkt nooit! Gebruik <strong>IS NULL</strong>.');
-         if(!s.includes('is null')) return err('Gebruik <strong>IS NULL</strong> — nooit = NULL!');
+         if(!s.startsWith('select')) return err(t('chk_add_telefoon_6'));
+         if(!s.includes('telefoon')) return err(t('chk_add_telefoon_7'));
+         if(s.includes('= null')||s.includes('=null')) return err(t('chk_add_telefoon_8'));
+         if(!s.includes('is null')) return err(t('chk_add_telefoon_9'));
          const res=runSQL(sql); if(!res.ok) return res;
          return res;
        },
@@ -650,13 +636,13 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, stock FROM product WHERE stock < 5'));
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('stock')) return err('Filter op de kolom <strong>stock</strong> met de juiste drempelwaarde.');
-     if(!s.includes('<')&&!s.includes('<=4')&&!s.includes('<= 4')) return err('Gebruik de operator < (kleiner dan): WHERE stock <strong>&lt;</strong> 5');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_low_stock_1')));
+     if(!s.includes('product')) return err(t('chk_low_stock_2'));
+     if(!s.includes('stock')) return err(t('chk_low_stock_3'));
+     if(!s.includes('<')&&!s.includes('<=4')&&!s.includes('<= 4')) return err(t('chk_low_stock_4'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(res.rows&&res.rows.some(r=>Number(r.stock)>=5)) return err('Je filtert te ruim. Controleer je drempelwaarde in de WHERE-clausule.');
+     if(res.rows&&res.rows.some(r=>Number(r.stock)>=5)) return err(t('chk_low_stock_5'));
      return res;
    },
    win:'Urgentielijst klaar! Bestelling geplaatst bij leverancier. 📦'},
@@ -669,12 +655,12 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err('Gebruik UPDATE bestelling SET status = \'geleverd\' WHERE bestelling_id = 4');
-     if(!s.includes('bestelling')) return err('Tabel is <strong>bestelling</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders update je ALLE bestellingen.');
-     if(!s.includes('geleverd')) return err('Status moet <strong>"geleverd"</strong> zijn. Schrijf: SET status = \'geleverd\'');
-     if(!s.includes('4')&&!s.includes('bestelling_id')) return err('Voeg een WHERE-clausule toe om slechts één bestelling bij te werken.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(t('chk_update_order_status_1'));
+     if(!s.includes('bestelling')) return err(t('chk_update_order_status_2'));
+     if(!s.includes('where')) return err(t('chk_update_order_status_3'));
+     if(!s.includes('geleverd')) return err(t('chk_update_order_status_4'));
+     if(!s.includes('4')&&!s.includes('bestelling_id')) return err(t('chk_update_order_status_5'));
+     return smartRunAndVerify(sql, 'bestelling', 'bestelling_id', 4, {status: 'geleverd'});
    },
    win:'Bestelling gemarkeerd als geleverd! Klant krijgt bevestiging. ✅'},
 
@@ -693,10 +679,10 @@ const SCENARIOS = [
        hint:'CREATE TABLE leverancier (\n  leverancier_id INT PRIMARY KEY AUTO_INCREMENT,\n  naam VARCHAR(100) NOT NULL,\n  email VARCHAR(150),\n  land VARCHAR(80)\n)',
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('create table')) return err('Begin met <strong>CREATE TABLE leverancier</strong> (...)');
-         if(!s.includes('leverancier')) return err('Noem de tabel <strong>leverancier</strong>.');
-         if(!s.includes('primary key')) return err('Voeg <strong>PRIMARY KEY</strong> toe aan het ID-veld.');
-         if(!s.includes('naam')) return err('Kolom <strong>naam</strong> ontbreekt. Vergeet NOT NULL niet.');
+         if(!s.startsWith('create table')) return err(t('chk_create_leverancier_1'));
+         if(!s.includes('leverancier')) return err(t('chk_create_leverancier_2'));
+         if(!s.includes('primary key')) return err(t('chk_create_leverancier_3'));
+         if(!s.includes('naam')) return err(t('chk_create_leverancier_4'));
          return smartRunMsg(sql);
        },
        successMsg:'Tabel aangemaakt! Nu kun je er meteen data in zetten.',
@@ -708,11 +694,11 @@ const SCENARIOS = [
        hint:"INSERT INTO leverancier (naam, email, land)\nVALUES ('TechParts BV', 'info@techparts.be', 'Belgie')",
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('insert')) return err('Begin met <strong>INSERT INTO leverancier</strong>.');
-         if(!s.includes('leverancier')) return err('Voeg in in tabel <strong>leverancier</strong>.');
-         if(!s.includes('techparts')) return err('Naam "TechParts BV" ontbreekt.');
-         if(!s.includes('info@techparts.be')) return err('E-mailadres "info@techparts.be" ontbreekt.');
-         if(!s.includes('belgi')) return err('Land "Belgie" ontbreekt.');
+         if(!s.startsWith('insert')) return err(t('chk_create_leverancier_5'));
+         if(!s.includes('leverancier')) return err(t('chk_create_leverancier_6'));
+         if(!s.includes('techparts')) return err(t('chk_create_leverancier_7'));
+         if(!s.includes('info@techparts.be')) return err(t('chk_create_leverancier_8'));
+         if(!s.includes('belgi')) return err(t('chk_create_leverancier_9'));
          return smartRunMsg(sql);
        },
      },
@@ -727,10 +713,10 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT AVG(score) FROM review'));
-     if(!s.includes('avg')) return err('Gebruik de <strong>AVG()</strong>-functie om het gemiddelde te berekenen.');
-     if(!s.includes('review')) return err('Gebruik FROM <strong>review</strong> (daar staan de scores).');
-     if(!s.includes('score')&&!s.includes('*')) return err('Bereken het gemiddelde van de score-kolom met de juiste aggregatiefunctie.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_avg_review_1')));
+     if(!s.includes('avg')) return err(t('chk_avg_review_2'));
+     if(!s.includes('review')) return err(t('chk_avg_review_3'));
+     if(!s.includes('score')&&!s.includes('*')) return err(t('chk_avg_review_4'));
      return smartRunMsg(sql);
    },
    win:'Gemiddelde score berekend. ⭐'},
@@ -743,13 +729,13 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, prijs FROM product WHERE prijs > 50 ORDER BY prijs DESC'));
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('50')) return err('Filter op prijs > 50. Vergeet het getal 50 niet.');
-     if(!s.includes('>')) return err('Gebruik een vergelijkingsoperator in je WHERE-clausule om op prijs te filteren.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_expensive_1')));
+     if(!s.includes('product')) return err(t('chk_expensive_2'));
+     if(!s.includes('50')) return err(t('chk_expensive_3'));
+     if(!s.includes('>')) return err(t('chk_expensive_4'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(res.rows&&res.rows.some(r=>Number(r.prijs)<=50)) return err('Je lijst bevat ook producten van €50 of minder. Gebruik > (niet >=).');
+     if(res.rows&&res.rows.some(r=>Number(r.prijs)<=50)) return err(t('chk_expensive_5'));
      return res;
    },
    win:'CFO heeft zijn rapport. Marges goed! 💰'},
@@ -762,14 +748,14 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT ... FROM bestelling, klant WHERE ...'));
-     if(!s.includes('bestelling')) return err('Vergeet tabel <strong>bestelling</strong> niet in FROM.');
-     if(!s.includes('klant')) return err('Vergeet tabel <strong>klant</strong> niet in FROM.');
-     if(!s.includes('klant_id')) return err('Koppel de tabellen via <strong>klant_id</strong>: WHERE b.klant_id = k.klant_id');
-     if(!s.includes('=')&&!s.includes('klant_id')) return err('JOIN-voorwaarde ontbreekt: WHERE b.klant_id = k.klant_id');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_join_orders_1')));
+     if(!s.includes('bestelling')) return err(t('chk_join_orders_2'));
+     if(!s.includes('klant')) return err(t('chk_join_orders_3'));
+     if(!s.includes('klant_id')) return err(t('chk_join_orders_4'));
+     if(!s.includes('=')&&!s.includes('klant_id')) return err(t('chk_join_orders_5'));
      const res = smartRunMsg(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer je JOIN-voorwaarde: b.klant_id = k.klant_id');
+     if(!rowCount(res)) return err(t('chk_join_orders_6'));
      return res;
    },
    win:'JOIN geslaagd! Logistiek heeft overzicht. 🔗'},
@@ -782,11 +768,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT klant_id, COUNT(*) FROM bestelling GROUP BY klant_id HAVING COUNT(*) > 1'));
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om bestellingen per klant te tellen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per klant te groeperen.');
-     if(!s.includes('having')) return err(stripSolution('Gebruik <strong>HAVING</strong> (niet WHERE) om op groepsresultaten te filteren. HAVING COUNT(*) > 1'));
-     if(s.includes('where count')) return err(stripSolution('Gebruik HAVING om op COUNT() te filteren, niet WHERE. WHERE werkt vóór groepering, HAVING erna.'));
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_having_1')));
+     if(!s.includes('count')) return err(t('chk_having_2'));
+     if(!s.includes('group by')) return err(t('chk_having_3'));
+     if(!s.includes('having')) return err(stripSolution(t('chk_having_4')));
+     if(s.includes('where count')) return err(stripSolution(t('chk_having_5')));
      return smartRunMsg(sql);
    },
    win:'VIP-lijst klaar! Jana Pieters is onze trouwste klant. 👑'},
@@ -799,12 +785,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, stock FROM product ORDER BY stock DESC LIMIT 1'));
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('stock')) return err('Je hebt kolom <strong>stock</strong> nodig.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_max_stock_1')));
+     if(!s.includes('product')) return err(t('chk_max_stock_2'));
+     if(!s.includes('stock')) return err(t('chk_max_stock_3'));
      const hasMax = s.includes('max(stock)');
      const hasOrderLimit = s.includes('order by')&&s.includes('limit')&&s.includes('desc');
-     if(!hasMax&&!hasOrderLimit) return err(stripSolution('Gebruik ORDER BY stock DESC LIMIT 1 om het hoogste te vinden. Of gebruik MAX(stock).'));
+     if(!hasMax&&!hasOrderLimit) return err(stripSolution(t('chk_max_stock_4')));
      return smartRunMsg(sql);
    },
    win:'Notitieboek A5 heeft hoogste stock. Opslag geoptimaliseerd! 📦'},
@@ -817,10 +803,10 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT categorie, COUNT(*) FROM product GROUP BY categorie'));
-     if(!s.includes('categorie')) return err('Selecteer de <strong>categorie</strong>-kolom en groepeer erop.');
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om het aantal per categorie te tellen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per categorie te groeperen.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_products_per_category_1')));
+     if(!s.includes('categorie')) return err(t('chk_products_per_category_2'));
+     if(!s.includes('count')) return err(t('chk_products_per_category_3'));
+     if(!s.includes('group by')) return err(t('chk_products_per_category_4'));
      return smartRunMsg(sql);
    },
    win:'Categorieoverzicht klaar. Elektronica domineert! 🏆'},
@@ -833,10 +819,10 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT MIN(prijs), MAX(prijs) FROM product'));
-     if(!s.includes('min')) return err('Gebruik de juiste aggregatiefunctie voor de goedkoopste prijs.');
-     if(!s.includes('max')) return err('Voeg ook de aggregatiefunctie voor de duurste prijs toe in dezelfde SELECT.');
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_min_max_prijs_1')));
+     if(!s.includes('min')) return err(t('chk_min_max_prijs_2'));
+     if(!s.includes('max')) return err(t('chk_min_max_prijs_3'));
+     if(!s.includes('product')) return err(t('chk_min_max_prijs_4'));
      return smartRunMsg(sql);
    },
    win:'Prijsbereik bepaald. Perfecte input voor de winststrategie! 💶'},
@@ -849,15 +835,15 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT ... FROM bestelling, klant, product WHERE ...'));
-     if(!s.includes('bestelling')) return err('Voeg tabel <strong>bestelling</strong> toe aan FROM.');
-     if(!s.includes('klant')) return err('Voeg tabel <strong>klant</strong> toe aan FROM.');
-     if(!s.includes('product')) return err('Voeg tabel <strong>product</strong> toe aan FROM.');
-     if(!s.includes('klant_id')) return err('Koppel bestelling ↔ klant via <strong>klant_id</strong>: b.klant_id = k.klant_id');
-     if(!s.includes('product_id')) return err('Koppel bestelling ↔ product via <strong>product_id</strong>: b.product_id = p.product_id');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_join_all_1')));
+     if(!s.includes('bestelling')) return err(t('chk_join_all_2'));
+     if(!s.includes('klant')) return err(t('chk_join_all_3'));
+     if(!s.includes('product')) return err(t('chk_join_all_4'));
+     if(!s.includes('klant_id')) return err(t('chk_join_all_5'));
+     if(!s.includes('product_id')) return err(t('chk_join_all_6'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer beide JOIN-voorwaarden.');
+     if(!rowCount(res)) return err(t('chk_join_all_7'));
      return res;
    },
    win:'Megaoverzicht geleverd! De raad is onder de indruk. 🌐'},
@@ -871,15 +857,15 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT DISTINCT stad FROM klant');
-     if(!s.includes('distinct')) return err('Gebruik het sleutelwoord <strong>DISTINCT</strong> om duplicaten te verwijderen: SELECT DISTINCT stad FROM klant');
-     if(!s.includes('stad')) return err('Selecteer de kolom <strong>stad</strong>.');
-     if(!s.includes('klant')) return err('Gebruik FROM <strong>klant</strong>.');
+     if(!s.startsWith('select')) return err(t('chk_distinct_steden_1'));
+     if(!s.includes('distinct')) return err(t('chk_distinct_steden_2'));
+     if(!s.includes('stad')) return err(t('chk_distinct_steden_3'));
+     if(!s.includes('klant')) return err(t('chk_distinct_steden_4'));
      const res = runSQL(sql);
      if(!res.ok) return res;
      // Check no duplicates
      const vals = res.rows.map(r=>r.stad);
-     if(new Set(vals).size !== vals.length) return err('Er zitten nog duplicaten in het resultaat. Gebruik DISTINCT.');
+     if(new Set(vals).size !== vals.length) return err(t('chk_distinct_steden_5'));
      return res;
    },
    win:'Unieke steden gevonden! Campagne per regio kan starten. 🗺️'},
@@ -892,16 +878,16 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT naam AS product, prijs AS verkoopprijs FROM product');
-     if(!s.includes(' as ')) return err('Gebruik het sleutelwoord <strong>AS</strong> voor aliassen: naam AS product');
-     if(!s.includes('product')&&!s.includes('naam')) return err('Gebruik kolom <strong>naam</strong> met alias <strong>product</strong>: naam AS product');
-     if(!s.includes('prijs')&&!s.includes('verkoopprijs')) return err('Gebruik kolom <strong>prijs</strong> met alias <strong>verkoopprijs</strong>: prijs AS verkoopprijs');
+     if(!s.startsWith('select')) return err(t('chk_alias_products_1'));
+     if(!s.includes(' as ')) return err(t('chk_alias_products_2'));
+     if(!s.includes('product')&&!s.includes('naam')) return err(t('chk_alias_products_3'));
+     if(!s.includes('prijs')&&!s.includes('verkoopprijs')) return err(t('chk_alias_products_4'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten.');
+     if(!rowCount(res)) return err(t('chk_alias_products_5'));
      const cols = res.rows.length ? Object.keys(res.rows[0]) : [];
      if(!cols.some(c=>c.toLowerCase().includes('product')||c.toLowerCase().includes('naam')))
-       return err('Kolomnaam "product" niet gevonden in resultaat. Gebruik: naam AS product');
+       return err(t('chk_alias_products_6'));
      return res;
    },
    win:'Rapport met leesbare kolomnamen klaar! CFO tevreden. 📋'},
@@ -914,16 +900,16 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, prijs FROM product WHERE prijs > (SELECT AVG(prijs) FROM product)'));
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('avg')) return err(stripSolution('Gebruik een subquery met <strong>AVG(prijs)</strong> als drempel: WHERE prijs > (SELECT AVG(prijs) FROM product)'));
-     if(!s.includes('(select')) return err(stripSolution('Gebruik een subquery tussen haakjes: WHERE prijs > <strong>(SELECT AVG(prijs) FROM product)</strong>'));
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_subquery_above_avg_1')));
+     if(!s.includes('product')) return err(t('chk_subquery_above_avg_2'));
+     if(!s.includes('avg')) return err(stripSolution(t('chk_subquery_above_avg_3')));
+     if(!s.includes('(select')) return err(stripSolution(t('chk_subquery_above_avg_4')));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Is de subquery correct?');
+     if(!rowCount(res)) return err(t('chk_subquery_above_avg_5'));
      // Valideer: alle teruggegeven prijzen moeten boven het gemiddelde liggen
      const avg = DB.product.rows.reduce((s,r)=>s+r.prijs,0)/DB.product.rows.length;
-     if(res.rows.some(r=>Number(r.prijs)<=avg)) return err('Resultaat bevat producten onder het gemiddelde. Controleer de WHERE-conditie.');
+     if(res.rows.some(r=>Number(r.prijs)<=avg)) return err(t('chk_subquery_above_avg_6'));
      return res;
    },
    win:'Subquery geslaagd! Premium producten geïdentificeerd. 🏆'},
@@ -936,14 +922,14 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam, email FROM klant WHERE klant_id IN (SELECT klant_id FROM bestelling)'));
-     if(!s.includes('klant')) return err('Gebruik FROM <strong>klant</strong> voor de buitenste query.');
-     if(!s.includes('bestelling')) return err('De subquery moet FROM <strong>bestelling</strong> bevatten om klant_id\'s op te zoeken.');
-     if(!s.includes(' in ')) return err(stripSolution('Gebruik het sleutelwoord <strong>IN</strong>: WHERE klant_id IN (SELECT klant_id FROM bestelling)'));
-     if(!s.includes('(select')) return err(stripSolution('Gebruik een subquery: WHERE klant_id IN <strong>(SELECT klant_id FROM bestelling)</strong>'));
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_subquery_in_1')));
+     if(!s.includes('klant')) return err(t('chk_subquery_in_2'));
+     if(!s.includes('bestelling')) return err(t('chk_subquery_in_3'));
+     if(!s.includes(' in ')) return err(stripSolution(t('chk_subquery_in_4')));
+     if(!s.includes('(select')) return err(stripSolution(t('chk_subquery_in_5')));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer de subquery.');
+     if(!rowCount(res)) return err(t('chk_subquery_in_6'));
      return res;
    },
    win:'Klanten met bestellingen gevonden via subquery! Gerichte marketing mogelijk. 📧'},
@@ -956,11 +942,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT COUNT(DISTINCT stad) FROM klant'));
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT()</strong> om te tellen.');
-     if(!s.includes('distinct')) return err('Gebruik <strong>DISTINCT</strong> binnen COUNT om enkel unieke steden te tellen: COUNT(DISTINCT stad)');
-     if(!s.includes('stad')) return err('Tel de kolom <strong>stad</strong>: COUNT(DISTINCT stad)');
-     if(!s.includes('klant')) return err('Gebruik FROM <strong>klant</strong>.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_distinct_count_1')));
+     if(!s.includes('count')) return err(t('chk_distinct_count_2'));
+     if(!s.includes('distinct')) return err(t('chk_distinct_count_3'));
+     if(!s.includes('stad')) return err(t('chk_distinct_count_4'));
+     if(!s.includes('klant')) return err(t('chk_distinct_count_5'));
      return smartRunMsg(sql);
    },
    win:'Unieke steden geteld! Marketinggebieden bepaald. 🗺️'},
@@ -973,16 +959,16 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT k.naam AS klant, p.naam AS artikel, b.datum FROM ...');
-     if(!s.includes('bestelling')) return err('Voeg <strong>bestelling</strong> toe aan FROM.');
-     if(!s.includes('klant')) return err('Voeg <strong>klant</strong> toe aan FROM.');
-     if(!s.includes('product')) return err('Voeg <strong>product</strong> toe aan FROM.');
-     if(!s.includes('klant_id')) return err('Koppelconditie ontbreekt: b.klant_id = k.klant_id');
-     if(!s.includes('product_id')) return err('Koppelconditie ontbreekt: b.product_id = p.product_id');
-     if(!s.includes('order by')) return err('Sorteer op datum in aflopende volgorde (nieuwste eerst)');
+     if(!s.startsWith('select')) return err(t('chk_join_alias_order_1'));
+     if(!s.includes('bestelling')) return err(t('chk_join_alias_order_2'));
+     if(!s.includes('klant')) return err(t('chk_join_alias_order_3'));
+     if(!s.includes('product')) return err(t('chk_join_alias_order_4'));
+     if(!s.includes('klant_id')) return err(t('chk_join_alias_order_5'));
+     if(!s.includes('product_id')) return err(t('chk_join_alias_order_6'));
+     if(!s.includes('order by')) return err(t('chk_join_alias_order_7'));
      const res = runSQL(sql);
      if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer de JOIN-voorwaarden.');
+     if(!rowCount(res)) return err(t('chk_join_alias_order_8'));
      return res;
    },
    win:'Meesterwerk! JOIN + AS + ORDER BY in één query. Raad van Bestuur staat te klappen. 👏'},
@@ -996,12 +982,12 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT klant.naam, bestelling.datum FROM klant INNER JOIN bestelling ...'));
-     if(!s.includes('inner join')&&!s.includes('join')) return err('Gebruik <strong>INNER JOIN</strong> om de tabellen te koppelen: FROM klant INNER JOIN bestelling');
-     if(!s.includes('on')) return err('Voeg een <strong>ON</strong>-conditie toe om de tabellen te koppelen via de gemeenschappelijke sleutel.');
-     if(!s.includes('klant_id')) return err('Koppel de tabellen via het gemeenschappelijke <strong>klant_id</strong>-veld.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_inner_join_basic_1')));
+     if(!s.includes('inner join')&&!s.includes('join')) return err(t('chk_inner_join_basic_2'));
+     if(!s.includes('on')) return err(t('chk_inner_join_basic_3'));
+     if(!s.includes('klant_id')) return err(t('chk_inner_join_basic_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer de ON-conditie.');
+     if(!rowCount(res)) return err(t('chk_inner_join_basic_5'));
      return res;
    },
    win:'Perfecte INNER JOIN! Enkel klanten met bestellingen zichtbaar. ANSI-syntax onder de knie. ✅'},
@@ -1014,13 +1000,13 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT klant.naam, bestelling.datum FROM klant LEFT JOIN ...'));
-     if(!s.includes('left join')) return err('Gebruik <strong>LEFT JOIN</strong> (niet INNER JOIN) om ook klanten zonder bestelling te tonen.');
-     if(!s.includes('on')) return err('Voeg een <strong>ON</strong>-conditie toe om de tabellen te koppelen via de gemeenschappelijke sleutel.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_left_join_all_1')));
+     if(!s.includes('left join')) return err(t('chk_left_join_all_2'));
+     if(!s.includes('on')) return err(t('chk_left_join_all_3'));
      const res=runSQL(sql); if(!res.ok) return res;
      // LEFT JOIN moet meer rijen geven dan INNER JOIN
      const innerRes=runSQL('SELECT klant.naam, bestelling.datum FROM klant INNER JOIN bestelling ON klant.klant_id = bestelling.klant_id');
-     if(res.rows.length<=innerRes.rows.length) return err('Een LEFT JOIN geeft méér rijen dan een INNER JOIN (ook klanten zonder bestelling). Controleer je JOIN-type.');
+     if(res.rows.length<=innerRes.rows.length) return err(t('chk_left_join_all_4'));
      return res;
    },
    win:'LEFT JOIN geslaagd! Lena is onder de indruk: ook klanten zonder bestelling zijn zichtbaar. 🎯'},
@@ -1033,12 +1019,12 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT klant.naam, product.naam, product.prijs FROM klant INNER JOIN ...'));
-     if((s.match(/inner join|join/g)||[]).length<2) return err('Je hebt <strong>twee JOINs</strong> nodig: klant→bestelling én bestelling→product.');
-     if(!s.includes('klant_id')) return err('Koppel de eerste JOIN via het gemeenschappelijke klant_id-veld.');
-     if(!s.includes('product_id')) return err('Koppel de tweede JOIN via het gemeenschappelijke product_id-veld.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_join_three_tables_1')));
+     if((s.match(/inner join|join/g)||[]).length<2) return err(t('chk_join_three_tables_2'));
+     if(!s.includes('klant_id')) return err(t('chk_join_three_tables_3'));
+     if(!s.includes('product_id')) return err(t('chk_join_three_tables_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer beide ON-condities.');
+     if(!rowCount(res)) return err(t('chk_join_three_tables_5'));
      return res;
    },
    win:'3-tabel JOIN in één query! Dit is enterprise-niveau SQL. Board of Directors applauds. 👏'},
@@ -1051,16 +1037,16 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('join')) return err('Gebruik een <strong>INNER JOIN</strong> om klant en bestelling te koppelen.');
-     if(!s.includes('where')) return err("Filter op stad via <strong>WHERE klant.stad = 'Gent'</strong>");
-     if(!s.includes("'gent'")&&!s.includes('"gent"')) return err("Filter op <strong>Gent</strong> (met aanhalingstekens): WHERE klant.stad = 'Gent'");
+     if(!s.includes('join')) return err(t('chk_join_with_where_1'));
+     if(!s.includes('where')) return err(t('chk_join_with_where_2'));
+     if(!s.includes("'gent'")&&!s.includes('"gent"')) return err(t('chk_join_with_where_3'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten voor Gent. Controleer de WHERE-conditie en de JOIN.');
+     if(!rowCount(res)) return err(t('chk_join_with_where_4'));
      // Verify all results are from Gent
      const klantGentIds = new Set(DB.klant.rows.filter(r=>r.stad==='Gent').map(r=>r.klant_id));
      const resultKlantIds = res.rows.map(r=>r['klant.klant_id']||r.klant_id).filter(Boolean);
      if(resultKlantIds.length && resultKlantIds.some(id=>!klantGentIds.has(id)))
-       return err('Resultaat bevat klanten die niet uit Gent komen. Controleer de WHERE.');
+       return err(t('chk_join_with_where_5'));
      return res;
    },
    win:'JOIN + WHERE gecombineerd! Gentse klanten met hun orders in beeld voor gerichte campagnes. 📍'},
@@ -1073,11 +1059,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('sum')) return err('Gebruik de <strong>SUM()</strong>-functie om de totale prijs te berekenen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per categorie te berekenen.');
-     if(!s.includes('categorie')) return err('Groepeer op de kolom <strong>categorie</strong>.');
+     if(!s.includes('sum')) return err(t('chk_groupby_category_1'));
+     if(!s.includes('group by')) return err(t('chk_groupby_category_2'));
+     if(!s.includes('categorie')) return err(t('chk_groupby_category_3'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer je GROUP BY-syntax.');
+     if(!rowCount(res)) return err(t('chk_groupby_category_4'));
      return res;
    },
    win:'Omzet per categorie berekend! Elektronica loopt duidelijk het best. Financieel rapport klaar. 📈'},
@@ -1091,17 +1077,17 @@ const SCENARIOS = [
    validation: { expectedColumns: ['categorie'] },
    check(sql){
      const s=norm(sql);
-     if(!s.includes('avg')) return err('Gebruik de <strong>AVG()</strong>-functie om het gemiddelde te berekenen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om te groeperen.');
-     if(!s.includes('having')) return err(stripSolution('Gebruik <strong>HAVING</strong> (niet WHERE) om op het groepsgemiddelde te filteren: HAVING AVG(prijs) > 30'));
+     if(!s.includes('avg')) return err(t('chk_groupby_having_1'));
+     if(!s.includes('group by')) return err(t('chk_groupby_having_2'));
+     if(!s.includes('having')) return err(stripSolution(t('chk_groupby_having_3')));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Is de HAVING-drempel correct? Probeer een lagere waarde om te testen.');
+     if(!rowCount(res)) return err(t('chk_groupby_having_4'));
      // Valideer: alle teruggegeven gemiddelden moeten > 30 zijn
      const allAbove = res.rows.every(r => {
        const v = Object.values(r).find(v => typeof v === 'string' && !isNaN(parseFloat(v)));
        return v ? parseFloat(v) > 30 : true;
      });
-     if(!allAbove) return err('Resultaat bevat categorieën met gemiddelde prijs ≤ 30. Controleer de HAVING-conditie.');
+     if(!allAbove) return err(t('chk_groupby_having_5'));
      return res;
    },
    win:'HAVING gemeisterd! Enkel dure categorieën zichtbaar. Dit is het verschil tussen WHERE en HAVING. 🏆'},
@@ -1114,11 +1100,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om het aantal bestellingen te tellen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per status te groeperen.');
-     if(!s.includes('status')) return err('Groepeer op de kolom <strong>status</strong>.');
+     if(!s.includes('count')) return err(t('chk_groupby_count_status_1'));
+     if(!s.includes('group by')) return err(t('chk_groupby_count_status_2'));
+     if(!s.includes('status')) return err(t('chk_groupby_count_status_3'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer je GROUP BY-syntax.');
+     if(!rowCount(res)) return err(t('chk_groupby_count_status_4'));
      return res;
    },
    win:'Logistiek rapport klaar! Per status weten we exact hoeveel bestellingen wachten. 🚚'},
@@ -1139,14 +1125,14 @@ const SCENARIOS = [
          const s=norm(sql);
          // Reset tabel zodat dit scenario altijd werkt, ook als H2-combo al uitgevoerd was
          if(DB.leverancier) delete DB.leverancier;
-         if(!s.startsWith('create table')) return err('Begin met <strong>CREATE TABLE leverancier</strong> (...)');
-         if(!s.includes('leverancier')) return err('Noem de tabel <strong>leverancier</strong>.');
-         if(!s.includes('primary key')) return err('Voeg <strong>PRIMARY KEY</strong> toe aan leverancier_id.');
-         if(!s.includes('auto_increment')) return err('Voeg <strong>AUTO_INCREMENT</strong> toe.');
-         if(!s.includes('not null')) return err('Maak <strong>naam</strong> verplicht via <strong>NOT NULL</strong>.');
-         if(!s.includes('varchar')) return err('Gebruik <strong>VARCHAR</strong> voor tekstvelden.');
+         if(!s.startsWith('create table')) return err(t('chk_create_table_leverancier_1'));
+         if(!s.includes('leverancier')) return err(t('chk_create_table_leverancier_2'));
+         if(!s.includes('primary key')) return err(t('chk_create_table_leverancier_3'));
+         if(!s.includes('auto_increment')) return err(t('chk_create_table_leverancier_4'));
+         if(!s.includes('not null')) return err(t('chk_create_table_leverancier_5'));
+         if(!s.includes('varchar')) return err(t('chk_create_table_leverancier_6'));
          const res=runSQL(sql); if(!res.ok) return res;
-         if(!DB.leverancier) return err('Tabel niet aangemaakt. Controleer je syntax.');
+         if(!DB.leverancier) return err(t('chk_create_table_leverancier_7'));
          return res;
        },
        successMsg:'Tabel leverancier aangemaakt! Voeg nu een leverancier in.',
@@ -1158,11 +1144,11 @@ const SCENARIOS = [
        hint:"INSERT INTO leverancier (naam, email, land)\nVALUES ('CloudBase NV', 'cloud@cloudbase.be', 'Nederland')",
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('insert')) return err('Begin met <strong>INSERT INTO leverancier</strong>.');
-         if(!s.includes('leverancier')) return err('Voeg in in tabel <strong>leverancier</strong>.');
-         if(!s.includes('cloudbase')) return err('Naam "CloudBase NV" ontbreekt.');
-         if(!s.includes('cloud@cloudbase.be')) return err('E-mailadres "cloud@cloudbase.be" ontbreekt.');
-         if(!s.includes('nederland')) return err('Land "Nederland" ontbreekt.');
+         if(!s.startsWith('insert')) return err(t('chk_create_table_leverancier_8'));
+         if(!s.includes('leverancier')) return err(t('chk_create_table_leverancier_9'));
+         if(!s.includes('cloudbase')) return err(t('chk_create_table_leverancier_10'));
+         if(!s.includes('cloud@cloudbase.be')) return err(t('chk_create_table_leverancier_11'));
+         if(!s.includes('nederland')) return err(t('chk_create_table_leverancier_12'));
          return smartRunMsg(sql);
        },
      },
@@ -1186,11 +1172,11 @@ const SCENARIOS = [
          // Reset kolom als al eerder aangemaakt zodat dit scenario altijd werkt
          const existing = DB.klant.cols.findIndex(c=>c.n==='geboortedatum');
          if(existing !== -1) DB.klant.cols.splice(existing, 1);
-         if(!s.startsWith('alter')) return err('Begin met <strong>ALTER TABLE klant</strong>.');
-         if(!s.includes('klant')) return err('Pas de tabel <strong>klant</strong> aan.');
-         if(!s.includes('add')) return err('Gebruik <strong>ADD COLUMN</strong>.');
-         if(!s.includes('geboortedatum')) return err('Geef de kolom de naam <strong>geboortedatum</strong>.');
-         if(!s.includes('date')) return err('Gebruik datatype <strong>DATE</strong> voor datumvelden.');
+         if(!s.startsWith('alter')) return err(t('chk_alter_add_column_1'));
+         if(!s.includes('klant')) return err(t('chk_alter_add_column_2'));
+         if(!s.includes('add')) return err(t('chk_alter_add_column_3'));
+         if(!s.includes('geboortedatum')) return err(t('chk_alter_add_column_4'));
+         if(!s.includes('date')) return err(t('chk_alter_add_column_5'));
          const res=runSQL(sql); if(!res.ok) return res;
          return {ok:true,type:'ddl',msg:'Kolom geboortedatum toegevoegd! Alle klanten hebben nu geboortedatum = NULL.'};
        },
@@ -1203,10 +1189,10 @@ const SCENARIOS = [
        hint:"UPDATE klant\nSET geboortedatum = '1990-03-15'\nWHERE klant_id = 1",
        check(sql){
          const s=norm(sql);
-         if(!s.startsWith('update')) return err('Begin met <strong>UPDATE klant</strong>.');
-         if(!s.includes('geboortedatum')) return err('Stel de kolom <strong>geboortedatum</strong> in via SET.');
-         if(!s.includes('1990')) return err("Vul de datum <strong>'1990-03-15'</strong> in.");
-         if(!s.includes('klant_id')) return err('Voeg een <strong>WHERE klant_id = 1</strong> toe — anders update je alle klanten!');
+         if(!s.startsWith('update')) return err(t('chk_alter_add_column_6'));
+         if(!s.includes('geboortedatum')) return err(t('chk_alter_add_column_7'));
+         if(!s.includes('1990')) return err(t('chk_alter_add_column_8'));
+         if(!s.includes('klant_id')) return err(t('chk_alter_add_column_9'));
          const res=runSQL(sql); if(!res.ok) return res;
          return res;
        },
@@ -1222,12 +1208,12 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('join')) return err('Gebruik een <strong>INNER JOIN</strong> om klant en bestelling te koppelen.');
-     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om het aantal bestellingen per klant te tellen.');
-     if(!s.includes('group by')) return err('Gebruik <strong>GROUP BY</strong> om per klant te groeperen.');
-     if(!s.includes('having')) return err('Gebruik <strong>HAVING COUNT(*) > 1</strong> om enkel klanten met meer dan 1 bestelling te tonen.');
+     if(!s.includes('join')) return err(t('chk_join_having_advanced_1'));
+     if(!s.includes('count')) return err(t('chk_join_having_advanced_2'));
+     if(!s.includes('group by')) return err(t('chk_join_having_advanced_3'));
+     if(!s.includes('having')) return err(t('chk_join_having_advanced_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Zijn er klanten met meer dan 1 bestelling in de data?');
+     if(!rowCount(res)) return err(t('chk_join_having_advanced_5'));
      return res;
    },
    win:'JOIN + GROUP BY + HAVING in één query! Dit is het niveau van een senior data engineer. Investeerders tekenen. 🌟💰'},
@@ -1243,11 +1229,13 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err(stripSolution('Gebruik DELETE FROM review WHERE review_id = 3'));
-     if(!s.includes('review')) return err('Tabel is <strong>review</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht bij DELETE! Zonder WHERE verwijder je ALLE reviews.');
-     if(!s.includes('3')&&!s.includes('review_id')) return err('Voeg een WHERE-clausule toe om slechts één review te verwijderen.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(stripSolution(t('chk_delete_review_1')));
+     if(!s.includes('review')) return err(t('chk_delete_review_2'));
+     if(!s.includes('where')) return err(t('chk_delete_review_3'));
+     if(!s.includes('3')&&!s.includes('review_id')) return err(t('chk_delete_review_4'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     if (DB.review.rows.some(r => r.review_id === 3)) return err(t('chk_delete_row_exists'));
+     return res;
    },
    win:'Review verwijderd. Verzoek GDPR-conform verwerkt. ✅'},
 
@@ -1260,11 +1248,12 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO review (...) VALUES (...)'));
-     if(!s.includes('review')) return err('Tabel is <strong>review</strong>.');
-     if(!s.includes('score')) return err('Vergeet kolom <strong>score</strong> niet in de kolomlijst.');
-     if(!s.includes('5')) return err('Score is <strong>5</strong>. Voeg die toe in VALUES.');
-     if(!s.includes('top')) return err('Commentaar "Top kwaliteit!" ontbreekt in VALUES.');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_insert_review_1')));
+     if(!s.includes('review')) return err(t('chk_insert_review_2'));
+     if(!s.includes('score')) return err(t('chk_insert_review_3'));
+     if(!s.includes('5')) return err(t('chk_insert_review_4'));
+     if(!s.includes('top')) return err(t('chk_insert_review_5'));
+     if(missingQuotes(sql,'Top kwaliteit!')) return err(t('chk_missing_quotes'));
      return smartRunMsg(sql);
    },
    win:'Review opgeslagen! Jana is blij gehoord te worden. ⭐'},
@@ -1278,12 +1267,12 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err("Gebruik UPDATE kortingscode SET actief = 1 WHERE code = 'ZOMER20'");
-     if(!s.includes('kortingscode')) return err('Tabel is <strong>kortingscode</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders activeer je ALLE kortingscodes.');
-     if(!s.includes('zomer20')) return err("Filter op code = 'ZOMER20'. Vergeet de aanhalingstekens niet.");
-     if(!s.includes('actief')) return err('Gebruik SET om de actief-kolom op de juiste waarde te zetten.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(t('chk_activate_coupon_1'));
+     if(!s.includes('kortingscode')) return err(t('chk_activate_coupon_2'));
+     if(!s.includes('where')) return err(t('chk_activate_coupon_3'));
+     if(!s.includes('zomer20')) return err(t('chk_activate_coupon_4'));
+     if(!s.includes('actief')) return err(t('chk_activate_coupon_5'));
+     return smartRunAndVerify(sql, 'kortingscode', 'code_id', 2, {actief: 1});
    },
    win:'ZOMER20 geactiveerd! Campagne kan starten. 🌞'},
 
@@ -1296,11 +1285,13 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err(stripSolution('Gebruik DELETE FROM klant WHERE klant_id = 4'));
-     if(!s.includes('klant')) return err('Tabel is <strong>klant</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht bij DELETE! Zonder WHERE verwijder je ALLE klanten.');
-     if(!s.includes('4')&&!s.includes('klant_id')) return err('Voeg een WHERE-clausule toe om de juiste klant te filteren.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(stripSolution(t('chk_delete_inactive_1')));
+     if(!s.includes('klant')) return err(t('chk_delete_inactive_2'));
+     if(!s.includes('where')) return err(t('chk_delete_inactive_3'));
+     if(!s.includes('4')&&!s.includes('klant_id')) return err(t('chk_delete_inactive_4'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     if (DB.klant.rows.some(r => r.klant_id === 4)) return err(t('chk_delete_row_exists'));
+     return res;
    },
    win:'Kobe correct verwijderd uit de databank. 🧹'},
 
@@ -1313,11 +1304,11 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO kortingscode (...) VALUES (...)'));
-     if(!s.includes('kortingscode')) return err('Tabel is <strong>kortingscode</strong>.');
-     if(!s.includes('black30')) return err('Code "BLACK30" ontbreekt in VALUES. Zet tekst tussen aanhalingstekens.');
-     if(!s.includes('30')) return err('Korting van <strong>30</strong> ontbreekt in VALUES.');
-     if(!s.includes('gebruik')) return err('Vergeet kolom <strong>gebruik</strong> niet (waarde: 0).');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_insert_coupon_1')));
+     if(!s.includes('kortingscode')) return err(t('chk_insert_coupon_2'));
+     if(!s.includes('black30')) return err(t('chk_insert_coupon_3'));
+     if(!s.includes('30')) return err(t('chk_insert_coupon_4'));
+     if(!s.includes('gebruik')) return err(t('chk_insert_coupon_5'));
      return smartRunMsg(sql);
    },
    win:'BLACK30 aangemaakt! Klanten gaan genieten van 30% korting. 🛍️'},
@@ -1331,12 +1322,21 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err("Gebruik UPDATE product SET stock = stock + 10 WHERE categorie = 'Elektronica'");
-     if(!s.includes('product')) return err('Tabel is <strong>product</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders pas je de stock van ALLE producten aan.');
-     if(!s.includes('elektronica')) return err("Filter op categorie = 'Elektronica'. Vergeet de aanhalingstekens niet.");
-     if(!s.includes('stock + 10')&&!s.includes('stock+10')&&!s.includes('stock +10')) return err('Gebruik een <strong>relatieve optelling</strong> in SET — voeg het getal bij de huidige waarde op.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(t('chk_update_stock_category_1'));
+     if(!s.includes('product')) return err(t('chk_update_stock_category_2'));
+     if(!s.includes('where')) return err(t('chk_update_stock_category_3'));
+     if(!s.includes('elektronica')) return err(t('chk_update_stock_category_4'));
+     if(!s.includes('stock + 10')&&!s.includes('stock+10')&&!s.includes('stock +10')) return err(t('chk_update_stock_category_5'));
+     // Snapshot Elektronica stock before update
+     const _elekBefore = DB.product.rows.filter(r => r.categorie === 'Elektronica').map(r => ({id: r.product_id, stock: r.stock}));
+     const res = smartRunMsg(sql);
+     if (!res.ok) return res;
+     // Verify each Elektronica product stock increased by 10
+     for (const snap of _elekBefore) {
+       const row = DB.product.rows.find(r => r.product_id === snap.id);
+       if (!row || row.stock !== snap.stock + 10) return err(ti('js_chk_wrong_value', {col: 'stock', expected: snap.stock + 10, actual: row ? row.stock : 'missing'}));
+     }
+     return res;
    },
    win:'Elektronicastock opgehoogd! Geen tekorten meer. ⚡'},
 
@@ -1349,12 +1349,14 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err(stripSolution('Gebruik DELETE FROM review WHERE product_id = 3'));
-     if(!s.includes('review')) return err('Verwijder uit tabel <strong>review</strong>, niet uit product.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders verwijder je ALLE reviews.');
-     if(!s.includes('product_id')) return err('Voeg een WHERE-clausule toe om te filteren op het juiste product.');
-     if(!s.includes('3')) return err('Filter op product_id = <strong>3</strong> (Notitieboek A5).');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(stripSolution(t('chk_delete_product_reviews_1')));
+     if(!s.includes('review')) return err(t('chk_delete_product_reviews_2'));
+     if(!s.includes('where')) return err(t('chk_delete_product_reviews_3'));
+     if(!s.includes('product_id')) return err(t('chk_delete_product_reviews_4'));
+     if(!s.includes('3')) return err(t('chk_delete_product_reviews_5'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     if (DB.review.rows.some(r => r.product_id === 3)) return err(t('chk_delete_rows_exist'));
+     return res;
    },
    win:'Reviews verwijderd. Product kan nu volledig uit de databank. 🧹'},
 
@@ -1367,13 +1369,17 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err(stripSolution('Gebruik DELETE FROM klant WHERE klant_id NOT IN (SELECT klant_id FROM bestelling)'));
-     if(!s.includes('klant')) return err('Verwijder uit tabel <strong>klant</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Filter klanten zonder bestelling via een subquery.');
-     if(!s.includes('not in')) return err('Gebruik <strong>NOT IN</strong>: WHERE klant_id NOT IN (...)');
-     if(!s.includes('(select')) return err(stripSolution('Gebruik een subquery: WHERE klant_id NOT IN <strong>(SELECT klant_id FROM bestelling)</strong>'));
-     if(!s.includes('bestelling')) return err('De subquery haalt klant_ids op uit tabel <strong>bestelling</strong>.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(stripSolution(t('chk_delete_no_orders_1')));
+     if(!s.includes('klant')) return err(t('chk_delete_no_orders_2'));
+     if(!s.includes('where')) return err(t('chk_delete_no_orders_3'));
+     if(!s.includes('not in')) return err(t('chk_delete_no_orders_4'));
+     if(!s.includes('(select')) return err(stripSolution(t('chk_delete_no_orders_5')));
+     if(!s.includes('bestelling')) return err(t('chk_delete_no_orders_6'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     const orderKlantIds = new Set(DB.bestelling.rows.map(r => r.klant_id));
+     const orphans = DB.klant.rows.filter(r => !orderKlantIds.has(r.klant_id));
+     if (orphans.length > 0) return err(t('chk_delete_rows_exist'));
+     return res;
    },
    win:'Klanten zonder bestellingen opgeruimd. Zuivere databank! 🧹'},
 
@@ -1386,12 +1392,13 @@ const SCENARIOS = [
    sqlType:'insert',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('insert')) return err(stripSolution('Gebruik INSERT INTO bestelling (...) VALUES (...)'));
-     if(!s.includes('bestelling')) return err('Tabel is <strong>bestelling</strong>.');
-     if(!s.includes('2025-01-15')) return err("Datum 2025-01-15 ontbreekt. Schrijf datums als <code>'2025-01-15'</code>");
-     if(!s.includes('verwerking')) return err('Status "verwerking" ontbreekt in VALUES. Tekst hoort tussen aanhalingstekens.');
-     if(!s.includes('5')) return err('klant_id = <strong>5</strong> (Fatima El Asri) ontbreekt in VALUES.');
-     if(!s.includes('4')) return err('product_id = <strong>4</strong> (Ergonomische stoel) ontbreekt in VALUES.');
+     if(!s.startsWith('insert')) return err(stripSolution(t('chk_insert_bulk_order_1')));
+     if(!s.includes('bestelling')) return err(t('chk_insert_bulk_order_2'));
+     if(!s.includes('2025-01-15')) return err(t('chk_insert_bulk_order_3'));
+     if(!s.includes('verwerking')) return err(t('chk_insert_bulk_order_4'));
+     if(!s.includes('5')) return err(t('chk_insert_bulk_order_5'));
+     if(!s.includes('4')) return err(t('chk_insert_bulk_order_6'));
+     if(missingQuotes(sql,'2025-01-15')||missingQuotes(sql,'verwerking')) return err(t('chk_missing_quotes'));
      return smartRunMsg(sql);
    },
    win:'Bestellingsverwerking afgerond. Fatima krijgt een bevestiging. 📧'},
@@ -1405,13 +1412,13 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err("Gebruik UPDATE kortingscode SET korting = 25, gebruik = gebruik + 1 WHERE code = 'TROUW15'");
-     if(!s.includes('kortingscode')) return err('Tabel is <strong>kortingscode</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Anders pas je ALLE kortingscodes aan.');
-     if(!s.includes('trouw15')) return err("Filter op code = 'TROUW15'. Vergeet de aanhalingstekens niet.");
-     if(!s.includes('25')) return err('Nieuwe korting is <strong>25</strong>. Vergeet dat niet in SET.');
-     if(!s.includes('gebruik')) return err('Verhoog ook <strong>gebruik</strong> met 1: gebruik = gebruik + 1');
-     return smartRunMsg(sql);
+     if(!s.startsWith('update')) return err(t('chk_update_top_discount_1'));
+     if(!s.includes('kortingscode')) return err(t('chk_update_top_discount_2'));
+     if(!s.includes('where')) return err(t('chk_update_top_discount_3'));
+     if(!s.includes('trouw15')) return err(t('chk_update_top_discount_4'));
+     if(!s.includes('25')) return err(t('chk_update_top_discount_5'));
+     if(!s.includes('gebruik')) return err(t('chk_update_top_discount_6'));
+     return smartRunAndVerify(sql, 'kortingscode', 'code_id', 3, {korting: 25});
    },
    win:'TROUW15 bijgewerkt naar 25% korting. VIP-klant in de wolken! 👑'},
 
@@ -1424,12 +1431,14 @@ const SCENARIOS = [
    sqlType:'delete',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('delete')) return err('Schrijf een DELETE-statement met een WHERE-clausule die de gevraagde scores filtert.');
-     if(!s.includes('review')) return err('Verwijder uit tabel <strong>review</strong>.');
-     if(!s.includes('where')) return err('⚠️ WHERE verplicht! Zonder WHERE verwijder je ALLE reviews.');
-     if(!s.includes('score')) return err('Filter op kolom <strong>score</strong>. Reviews met score ≤ 2 moeten weg.');
-     if(!s.includes('<=')&&!s.includes('< 3')&&!s.includes('<3')) return err('Gebruik de juiste vergelijkingsoperator in je WHERE-clausule om lage scores te filteren.');
-     return smartRunMsg(sql);
+     if(!s.startsWith('delete')) return err(t('chk_delete_old_reviews_1'));
+     if(!s.includes('review')) return err(t('chk_delete_old_reviews_2'));
+     if(!s.includes('where')) return err(t('chk_delete_old_reviews_3'));
+     if(!s.includes('score')) return err(t('chk_delete_old_reviews_4'));
+     if(!s.includes('<=')&&!s.includes('< 3')&&!s.includes('<3')) return err(t('chk_delete_old_reviews_5'));
+     const res = smartRunMsg(sql); if (!res.ok) return res;
+     if (DB.review.rows.some(r => r.score <= 2)) return err(t('chk_delete_rows_exist'));
+     return res;
    },
    win:'Lage reviews verwijderd. Reputatie hersteld! ⭐'},
 
@@ -1445,12 +1454,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err("Begin met SELECT naam, email FROM klant WHERE naam LIKE 'J%'");
-     if(!s.includes('from klant')) return err('Gebruik FROM <strong>klant</strong>.');
-     if(!s.includes('like')) return err("Gebruik <strong>LIKE</strong> om op patroon te filteren: WHERE naam LIKE 'J%'");
-     if(!s.includes("'j%'")&&!s.includes('"j%"')) return err("Gebruik het patroon <code>'J%'</code> — % staat voor nul of meer tekens na de J.");
+     if(!s.startsWith('select')) return err(t('chk_like_search_1'));
+     if(!s.includes('from klant')) return err(t('chk_like_search_2'));
+     if(!s.includes('like')) return err(t('chk_like_search_3'));
+     if(!s.includes("'j%'")&&!s.includes('"j%"')) return err(t('chk_like_search_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err("Geen resultaten. Controleer het LIKE-patroon: 'J%' (hoofdletter of kleine letter).");
+     if(!rowCount(res)) return err(t('chk_like_search_5'));
      return res;
    },
    win:'J-klanten gevonden! Campagne verstuurd. 📣'},
@@ -1464,12 +1473,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT naam, prijs FROM product WHERE prijs BETWEEN 20 AND 80');
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('between')) return err('Gebruik <strong>BETWEEN ... AND ...</strong> om een prijsbereik te filteren.');
-     if(!s.includes('20')&&!s.includes('and')) return err('Schrijf het bereik als: BETWEEN <strong>20</strong> AND <strong>80</strong>');
+     if(!s.startsWith('select')) return err(t('chk_between_price_1'));
+     if(!s.includes('product')) return err(t('chk_between_price_2'));
+     if(!s.includes('between')) return err(t('chk_between_price_3'));
+     if(!s.includes('20')&&!s.includes('and')) return err(t('chk_between_price_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(res.rows&&res.rows.some(r=>Number(r.prijs)<20||Number(r.prijs)>80)) return err('Resultaat bevat producten buiten het bereik €20–€80. Controleer je BETWEEN-waarden.');
+     if(res.rows&&res.rows.some(r=>Number(r.prijs)<20||Number(r.prijs)>80)) return err(t('chk_between_price_5'));
      return res;
    },
    win:'Middensegment in kaart gebracht! Inkoopstrategie klaar. 💼'},
@@ -1483,11 +1492,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err('Begin met SELECT naam FROM klant WHERE email IS NULL');
-     if(!s.includes('klant')) return err('Gebruik FROM <strong>klant</strong>.');
-     if(s.includes('= null')||s.includes('=null')) return err('❌ <code>= NULL</code> werkt nooit in SQL! Gebruik altijd <strong>IS NULL</strong>.');
-     if(!s.includes('is null')) return err('Gebruik <strong>IS NULL</strong> om op ontbrekende waarden te filteren: WHERE email IS NULL');
-     if(!s.includes('email')) return err('Filter op kolom <strong>email</strong>: WHERE email IS NULL');
+     if(!s.startsWith('select')) return err(t('chk_null_email_1'));
+     if(!s.includes('klant')) return err(t('chk_null_email_2'));
+     if(s.includes('= null')||s.includes('=null')) return err(t('chk_null_email_3'));
+     if(!s.includes('is null')) return err(t('chk_null_email_4'));
+     if(!s.includes('email')) return err(t('chk_null_email_5'));
      return smartRunMsg(sql);
    },
    win:'Klanten zonder e-mail gevonden. Klantenservice neemt contact op via post. 📬'},
@@ -1501,16 +1510,16 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err(stripSolution('Begin met SELECT naam FROM product WHERE product_id NOT IN (SELECT product_id FROM review)'));
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong> voor de buitenste query.');
-     if(!s.includes('not in')) return err('Gebruik <strong>NOT IN</strong> om producten uit te sluiten die al een review hebben.');
-     if(!s.includes('(select')) return err(stripSolution('Gebruik een subquery: WHERE product_id NOT IN <strong>(SELECT product_id FROM review)</strong>'));
-     if(!s.includes('review')) return err('De subquery haalt product_ids op uit tabel <strong>review</strong>.');
+     if(!s.startsWith('select')) return err(stripSolution(t('chk_not_in_products_1')));
+     if(!s.includes('product')) return err(t('chk_not_in_products_2'));
+     if(!s.includes('not in')) return err(t('chk_not_in_products_3'));
+     if(!s.includes('(select')) return err(stripSolution(t('chk_not_in_products_4')));
+     if(!s.includes('review')) return err(t('chk_not_in_products_5'));
      const res=runSQL(sql); if(!res.ok) return res;
      // Check: no returned product should have a review
      const reviewedIds=new Set(DB.review.rows.map(r=>r.product_id));
      if(res.rows.some(r=>{const p=DB.product.rows.find(pr=>pr.naam===r.naam||pr.naam===r['naam']);return p&&reviewedIds.has(p.product_id);}))
-       return err('Resultaat bevat producten die al een review hebben. Controleer je NOT IN-subquery.');
+       return err(t('chk_not_in_products_6'));
      return res;
    },
    win:'Producten zonder feedback geïdentificeerd. Inkoopteam stuurt testpakketjes. 📦'},
@@ -1524,9 +1533,9 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('left join')) return err('Gebruik <strong>LEFT JOIN</strong> — alle klanten blijven zichtbaar, ook zonder bestelling.');
-     if(!s.includes('is null')) return err('Voeg <strong>WHERE bestelling.klant_id IS NULL</strong> toe om enkel klanten zonder bestelling te tonen.');
-     if(!s.includes('bestelling')) return err('JOIN de tabel <strong>bestelling</strong> en koppel via het gemeenschappelijke sleutelveld.');
+     if(!s.includes('left join')) return err(t('chk_anti_join_no_orders_1'));
+     if(!s.includes('is null')) return err(t('chk_anti_join_no_orders_2'));
+     if(!s.includes('bestelling')) return err(t('chk_anti_join_no_orders_3'));
      const res=runSQL(sql); if(!res.ok) return res;
      // All returned klanten should have NO bestelling
      const bestellingIds=new Set(DB.bestelling.rows.map(r=>r.klant_id));
@@ -1537,8 +1546,8 @@ const SCENARIOS = [
        const kid=klantIdMap[nameVal];
        return kid&&bestellingIds.has(kid);
      }))
-       return err('Resultaat bevat klanten die wél bestellingen hebben. Controleer de IS NULL-conditie.');
-     if(!rowCount(res)) return err('Geen klanten gevonden zonder bestelling. Controleer de LEFT JOIN + IS NULL combinatie.');
+       return err(t('chk_anti_join_no_orders_4'));
+     if(!rowCount(res)) return err(t('chk_anti_join_no_orders_5'));
      return res;
    },
    win:'Slapende klanten gevonden! Win-back campagne gestart. 📧'},
@@ -1552,12 +1561,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err("Begin met SELECT naam, prijs, stock FROM product WHERE naam LIKE '%Cam%'");
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('like')) return err("Gebruik <strong>LIKE</strong> met wildcard: WHERE naam LIKE '%Cam%'");
-     if(!s.includes('%cam%')&&!s.includes("'%cam%'")&&!s.includes('"cam"')) return err("Gebruik <code>'%Cam%'</code> — % aan beide kanten betekent 'bevat Cam'.");
+     if(!s.startsWith('select')) return err(t('chk_like_product_search_1'));
+     if(!s.includes('product')) return err(t('chk_like_product_search_2'));
+     if(!s.includes('like')) return err(t('chk_like_product_search_3'));
+     if(!s.includes('%cam%')&&!s.includes("'%cam%'")&&!s.includes('"cam"')) return err(t('chk_like_product_search_4'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err("Geen producten gevonden. Controleer het patroon '%Cam%'.");
+     if(!rowCount(res)) return err(t('chk_like_product_search_5'));
      return res;
    },
    win:'Zoekresultaten gevonden! Webcam HD en Camera-producten zichtbaar. 📷'},
@@ -1571,12 +1580,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err("Begin met SELECT ... FROM bestelling WHERE datum BETWEEN '2024-10-01' AND '2024-12-31'");
-     if(!s.includes('bestelling')) return err('Gebruik FROM <strong>bestelling</strong>.');
-     if(!s.includes('between')) return err("Gebruik <strong>BETWEEN '2024-10-01' AND '2024-12-31'</strong> voor het datumbereik.");
-     if(!s.includes('datum')) return err('Filter op kolom <strong>datum</strong>: WHERE datum BETWEEN ...');
-     if(!s.includes('2024-10-01')&&!s.includes('2024-10')) return err("Startdatum is <strong>'2024-10-01'</strong> (begin Q4). Datums schrijf je als tekst tussen aanhalingstekens.");
-     if(!s.includes('2024-12-31')&&!s.includes('2024-12')) return err("Einddatum is <strong>'2024-12-31'</strong> (einde Q4).");
+     if(!s.startsWith('select')) return err(t('chk_between_dates_1'));
+     if(!s.includes('bestelling')) return err(t('chk_between_dates_2'));
+     if(!s.includes('between')) return err(t('chk_between_dates_3'));
+     if(!s.includes('datum')) return err(t('chk_between_dates_4'));
+     if(!s.includes('2024-10-01')&&!s.includes('2024-10')) return err(t('chk_between_dates_5'));
+     if(!s.includes('2024-12-31')&&!s.includes('2024-12')) return err(t('chk_between_dates_6'));
      const res=runSQL(sql); if(!res.ok) return res;
      return res;
    },
@@ -1591,24 +1600,24 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('select')) return err("Begin met SELECT naam, stock, CASE WHEN ... END AS status FROM product");
-     if(!s.includes('product')) return err('Gebruik FROM <strong>product</strong>.');
-     if(!s.includes('case')) return err("Gebruik <strong>CASE WHEN ... THEN ... ELSE ... END</strong> voor conditionele labels.");
-     if(!s.includes('when')) return err("Voeg WHEN-clausules toe: <code>WHEN stock = 0 THEN 'Uitverkocht'</code>");
-     if(!s.includes('uitverkocht')&&!s.includes("'uitverkocht'")) return err("Label 'Uitverkocht' ontbreekt in je CASE WHEN (voor stock = 0).");
-     if(!s.includes('bijna')&&!s.includes("'bijna")) return err("Label 'Bijna op' ontbreekt (voor stock < 5).");
-     if(!s.includes('end')) return err("Sluit het CASE-blok af met <strong>END</strong>. Vergeet ook <code>AS status</code> niet.");
+     if(!s.startsWith('select')) return err(t('chk_case_stock_status_1'));
+     if(!s.includes('product')) return err(t('chk_case_stock_status_2'));
+     if(!s.includes('case')) return err(t('chk_case_stock_status_3'));
+     if(!s.includes('when')) return err(t('chk_case_stock_status_4'));
+     if(!s.includes('uitverkocht')&&!s.includes("'uitverkocht'")) return err(t('chk_case_stock_status_5'));
+     if(!s.includes('bijna')&&!s.includes("'bijna")) return err(t('chk_case_stock_status_6'));
+     if(!s.includes('end')) return err(t('chk_case_stock_status_7'));
      const res=runSQL(sql);
-     if(!res.ok) return err('SQL-fout. Controleer de CASE WHEN structuur: CASE WHEN ... THEN ... ELSE ... END AS status');
-     if(!rowCount(res)) return err('Geen resultaten. Controleer je CASE WHEN en FROM product.');
+     if(!res.ok) return err(t('chk_case_stock_status_8'));
+     if(!rowCount(res)) return err(t('chk_case_stock_status_9'));
      const hasStatus=res.rows.length&&Object.keys(res.rows[0]).some(k=>k.toLowerCase().includes('status')||k.toLowerCase()==='case');
-     if(!hasStatus) return err('Geef de CASE WHEN kolom een naam via <strong>AS status</strong>.');
+     if(!hasStatus) return err(t('chk_case_stock_status_10'));
      return res;
    },
    win:'CASE WHEN gemeisterd! Logistiek heeft nu een leesbaar stockoverzicht. Warehouse team juicht. 🎉'}
 ,
 
-  // ── NIEUWE SCENARIO'S ─────────────────────────────────────────\n\n  // JOIN scenario (medium)\n  {id:'join_product_review',ch:2,title:'Producten met hun reviews',icon:'⭐',av:'📊',who:'Marketing Manager',\n   story:'Marketing wil een overzicht van <strong>producten met hun gemiddelde reviewscore</strong>. Koppel de tabel product aan review via product_id.',\n   obj:'SELECT p.naam, AVG(r.score) AS gemiddelde FROM product p INNER JOIN review r ON p.product_id = r.product_id GROUP BY p.product_id, p.naam',\n   diff:'medium',lpd:'LPD4',xp:75,tbl:'product',time:60,\n   hint:'SELECT p.naam, AVG(r.score) AS gemiddelde\nFROM product p\nINNER JOIN review r ON p.product_id = r.product_id\nGROUP BY p.product_id, p.naam',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de gewenste kolommen en aggregatie te definiëren.');\n     if(!s.includes('review')) return err('JOIN de tabel <strong>review</strong> via product_id.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN</strong> om product aan review te koppelen.');\n     if(!s.includes('avg')) return err('Gebruik de <strong>AVG()</strong>-functie op de score-kolom.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de productvelden.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Reviewoverzicht klaar! Marketing heeft nu een duidelijk beeld van klanttevredenheid per product. 🌟'},\n\n  // SUBQUERY scenario (hard)\n  {id:'subquery_expensive',ch:3,title:'Producten duurder dan gemiddeld',icon:'💰',av:'💼',who:'Finance Director',\n   story:'Finance wil een lijst van <strong>producten die duurder zijn dan het gemiddelde</strong>. Gebruik een subquery om het gemiddelde te berekenen.',\n   obj:"SELECT naam, prijs FROM product WHERE prijs > (SELECT AVG(prijs) FROM product) ORDER BY prijs DESC",\n   diff:'hard',lpd:'LPD5',xp:110,tbl:'product',time:90,\n   hint:"SELECT naam, prijs\nFROM product\nWHERE prijs > (SELECT AVG(prijs) FROM product)\nORDER BY prijs DESC",\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, prijs FROM product.');\n     if(!s.includes('select avg') && !s.includes('(select')) return err('Gebruik een <strong>subquery</strong> in de WHERE-clausule om het gemiddelde te berekenen');\n     if(!s.includes('avg')) return err('Bereken het gemiddelde met de <strong>AVG()</strong>-functie in de subquery.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     if(!rowCount(res)) return err('Geen resultaten. Controleer je subquery en WHERE-conditie.');\n     return res;\n   },\n   win:'Subquery gemeisterd! Finance heeft nu een lijst van premium producten boven het gemiddelde. 💎'},\n\n  // UPDATE scenario (easy)  \n  {id:'update_email',ch:0,title:'E-mailadres bijwerken',icon:'📧',av:'👤',who:'Klantenservice',\n   story:'Klant Jana Pieters (klant_id=1) heeft haar e-mailadres gewijzigd naar <strong>jana.pieters@nieuw.be</strong>. Update de database.',\n   obj:"UPDATE klant SET email = 'jana.pieters@nieuw.be' WHERE klant_id = 1",\n   diff:'easy',lpd:'LPD2',xp:30,tbl:'klant',time:35,\n   hint:"UPDATE klant\nSET email = 'jana.pieters@nieuw.be'\nWHERE klant_id = 1",\n   sqlType:'update',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('update')) return err('Begin met <strong>UPDATE klant</strong>.');\n     if(!s.includes('klant')) return err('Werk de tabel <strong>klant</strong> bij.');\n     if(!s.includes('email')) return err('Zet de kolom <strong>email</strong> via SET.');\n     if(!s.includes('klant_id')) return err('Voeg een <strong>WHERE</strong>-clausule toe op klant_id — anders worden alle klanten bijgewerkt!');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'E-mail bijgewerkt! Jana kan nu inloggen met haar nieuwe adres. 📬'},\n\n  // SELECT + LIKE (easy)\n  {id:'search_by_email_domain',ch:1,title:'Klanten op e-maildomein zoeken',icon:'🔍',av:'🛡️',who:'IT Security',\n   story:'IT wil alle klanten vinden met een <strong>@mail.be</strong> e-mailadres voor een security-controle.',\n   obj:"SELECT naam, email FROM klant WHERE email LIKE '%@mail.be'",\n   diff:'easy',lpd:'LPD2',xp:35,tbl:'klant',time:40,\n   hint:"SELECT naam, email\nFROM klant\nWHERE email LIKE '%@mail.be'",\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, email.');\n     if(!s.includes('like')) return err('Gebruik <strong>LIKE</strong> voor patroonzoekopdrachten.');\n     if(!s.includes('@mail.be')) return err("Zoek op het patroon <strong>'%@mail.be'</strong> — % matcht alles voor het @.");\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Security-controle klaar! Alle @mail.be klanten gevonden. 🔐'},\n\n  // JOIN + GROUP BY (hard)\n  {id:'revenue_per_customer',ch:4,title:'Omzet per klant berekenen',icon:'💹',av:'📈',who:'CFO',\n   story:'De CFO wil weten hoeveel <strong>elke klant totaal heeft besteld</strong> (som van totaal_prijs). Sorteer op omzet aflopend.',\n   obj:'SELECT k.naam, SUM(b.totaal_prijs) AS omzet FROM klant k INNER JOIN bestelling b ON k.klant_id = b.klant_id GROUP BY k.klant_id, k.naam ORDER BY omzet DESC',\n   diff:'hard',lpd:'LPD5',xp:140,tbl:'bestelling',time:120,\n   hint:'SELECT k.naam, SUM(b.totaal_prijs) AS omzet\nFROM klant k\nINNER JOIN bestelling b ON k.klant_id = b.klant_id\nGROUP BY k.klant_id, k.naam\nORDER BY omzet DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de klantnaam en de berekende totaalwaarde te selecteren.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN bestelling b</strong> om klant aan bestelling te koppelen.');\n     if(!s.includes('sum')) return err('Bereken de totale omzet met de <strong>SUM()</strong>-functie.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de klantvelden.');\n     if(!s.includes('order by')) return err('Sorteer het resultaat aflopend op de berekende omzetkolom.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Omzetranking klaar! De CFO ziet nu wie de top-klanten zijn. 🏆'},\n\n  // ── EXTRA SCENARIO'S (v5) ─────────────────────────────────────\n\n  // Easy SELECT – chapter 0 (beginner-friendly intro)\n  {id:'select_all_products',ch:0,title:'Alle producten bekijken',icon:'📦',av:'👔',who:'Thomas — Adviseur',\n   story:'Je hebt net toegang tot de database. Bekijk alle producten om een overzicht te krijgen van het assortiment.',\n   obj:'SELECT * FROM product',\n   diff:'easy',lpd:'LPD1',xp:15,tbl:'product',time:20,\n   hint:'SELECT *\nFROM product',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met <strong>SELECT</strong>.');\n     if(!s.includes('product')) return err('Haal gegevens op <strong>FROM product</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     if(!rowCount(res)) return err('Geen rijen gevonden. Controleer de tabelnaam.');\n     return res;\n   },\n   win:'Perfect! Je ziet nu alle producten. Zo krijg je snel overzicht. 🎉'},\n\n  // Easy SELECT – chapter 0\n  {id:'count_klanten',ch:0,title:'Hoeveel klanten zijn er?',icon:'🔢',av:'💻',who:'System',\n   story:'Een investeerder vraagt hoeveel klanten DataShop heeft. Tel alle rijen in de klant-tabel.',\n   obj:'SELECT COUNT(*) AS aantal_klanten FROM klant',\n   diff:'easy',lpd:'LPD1',xp:20,tbl:'klant',time:25,\n   hint:'SELECT COUNT(*) AS aantal_klanten\nFROM klant',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT COUNT(*).');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om rijen te tellen.');\n     if(!s.includes('klant')) return err('Tel rijen in de tabel <strong>klant</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Geteld! Je weet nu exact hoeveel klanten er zijn. 📊'},\n\n  // Hard JOIN – chapter 3\n  {id:'join_top_products',ch:3,title:'Bestsellers via bestellingen',icon:'🏆',av:'📈',who:'Venture Capitalist',\n   story:'De investeerder wil weten welke producten het vaakst besteld zijn. JOIN product en bestelling, tel bestellingen per product, sorteer aflopend.',\n   obj:'SELECT p.naam, COUNT(b.bestelling_id) AS aantal FROM product p LEFT JOIN bestelling b ON p.product_id = b.product_id GROUP BY p.product_id, p.naam ORDER BY aantal DESC',\n   diff:'hard',lpd:'LPD4',xp:135,tbl:'bestelling',time:120,\n   hint:'SELECT p.naam, COUNT(b.bestelling_id) AS aantal\nFROM product p\nLEFT JOIN bestelling b ON p.product_id = b.product_id\nGROUP BY p.product_id, p.naam\nORDER BY aantal DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de productnaam en het berekende aantal te selecteren.');\n     if(!s.includes('join')) return err('Gebruik een <strong>JOIN</strong> op bestelling via product_id.');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT()</strong> om het aantal bestellingen te tellen.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de productvelden.');\n     if(!s.includes('order by')) return err('Sorteer met <strong>ORDER BY aantal DESC</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Bestseller-ranking klaar! De investor is onder de indruk. 🏆'},\n\n  // Medium UPDATE – chapter 2\n  {id:'update_stock_bulk',ch:2,title:'Stock aanvullen na levering',icon:'🚚',av:'📦',who:'Warehouse Manager',\n   story:'Er is een levering binnengekomen. Verhoog de stock van ALLE producten met categorie "Elektronica" met 10.',\n   obj:"UPDATE product SET stock = stock + 10 WHERE categorie = 'Elektronica'",\n   diff:'medium',lpd:'LPD3',xp:65,tbl:'product',time:55,\n   hint:"UPDATE product\nSET stock = stock + 10\nWHERE categorie = 'Elektronica'",\n   sqlType:'update',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('update')) return err('Begin met <strong>UPDATE product</strong>.');\n     if(!s.includes('stock')) return err('Verhoog de kolom <strong>stock</strong> via SET.');\n     if(!s.includes('+ 10') && !s.includes('+10')) return err('Gebruik <strong>stock + 10</strong> om relatief te verhogen (niet een absoluut getal).');\n     if(!s.includes('elektronica')) return err("Filter op <strong>WHERE categorie = 'Elektronica'</strong>.");\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Voorraad bijgewerkt! Alle elektronica-producten hebben 10 extra stuks. 📦'},\n\n  // Easy SELECT – chapter 1\n  {id:'select_active_products',ch:1,title:'Producten in stock',icon:'✅',av:'🛒',who:'Webshop Team',\n   story:'De webshop toont alleen producten met meer dan 0 stuks op voorraad. Haal alle producten op waar <strong>stock > 0</strong>.',\n   obj:'SELECT naam, prijs, stock FROM product WHERE stock > 0 ORDER BY stock DESC',\n   diff:'easy',lpd:'LPD1',xp:25,tbl:'product',time:30,\n   hint:'SELECT naam, prijs, stock\nFROM product\nWHERE stock > 0\nORDER BY stock DESC',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, prijs, stock.');\n     if(!s.includes('product')) return err('Haal op FROM <strong>product</strong>.');\n     if(!s.includes('stock > 0') && !s.includes('stock>0')) return err('Filter op <strong>stock > 0</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Productoverzicht klaar! De webshop toont nu alleen leverbare producten. ✅'},\n\n  // Hard SELECT subquery – chapter 4\n  {id:'subquery_top_customer',ch:4,title:'Klant met meeste bestellingen',icon:'👑',av:'📈',who:'VIP Manager',\n   story:'Zoek de naam van de klant die de <strong>meeste bestellingen</strong> heeft geplaatst. Gebruik een subquery of GROUP BY + LIMIT.',\n   obj:'SELECT k.naam, COUNT(b.bestelling_id) AS totaal FROM klant k JOIN bestelling b ON k.klant_id = b.klant_id GROUP BY k.klant_id, k.naam ORDER BY totaal DESC LIMIT 1',\n   diff:'hard',lpd:'LPD5',xp:145,tbl:'bestelling',time:110,\n   hint:'SELECT k.naam, COUNT(b.bestelling_id) AS totaal\nFROM klant k\nJOIN bestelling b ON k.klant_id = b.klant_id\nGROUP BY k.klant_id, k.naam\nORDER BY totaal DESC\nLIMIT 1',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de klantnaam en het berekende aantal te selecteren.');\n     if(!s.includes('join')) return err('Gebruik een <strong>JOIN</strong> op bestelling.');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT()</strong> om het aantal bestellingen te tellen.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de klantvelden.');\n     if(!s.includes('limit')) return err('Beperk het resultaat tot de eerste rij met <strong>LIMIT</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'VIP-klant gevonden! Dit is goud voor de marketingafdeling. 👑'},\n\n  // Easy DELETE – chapter 0\n  {id:'delete_test_klant',ch:0,title:'Testklant verwijderen',icon:'🧹',av:'💻',who:'System',\n   story:'Bij de opstart werd een testklant (klant_id=99) aangemaakt. Verwijder die rij.',\n   obj:'DELETE FROM klant WHERE klant_id = 99',\n   diff:'easy',lpd:'LPD2',xp:25,tbl:'klant',time:25,\n   hint:'DELETE FROM klant\nWHERE klant_id = 99',\n   sqlType:'delete',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('delete')) return err('Begin met <strong>DELETE FROM klant</strong>.');\n     if(!s.includes('klant')) return err('Verwijder uit de tabel <strong>klant</strong>.');\n     if(!s.includes('where')) return err('Voeg een <strong>WHERE</strong>-clausule toe op klant_id — anders verwijder je alle klanten!');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Testdata opgeruimd! De database is nu schoon. 🧹'},\n\n  // Medium JOIN – chapter 2\n  {id:'join_klant_review',ch:2,title:'Klanten met hun reviews',icon:'💬',av:'📊',who:'Alex — Data Analyst',\n   story:'Welke klanten hebben reviews geschreven? Gebruik een JOIN om namen en reviewscores samen te tonen.',\n   obj:'SELECT k.naam, r.score, r.tekst FROM klant k INNER JOIN review r ON k.klant_id = r.klant_id ORDER BY r.score DESC',\n   diff:'medium',lpd:'LPD3',xp:75,tbl:'review',time:65,\n   hint:'SELECT k.naam, r.score, r.tekst\nFROM klant k\nINNER JOIN review r ON k.klant_id = r.klant_id\nORDER BY r.score DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT k.naam, r.score, r.tekst.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN review r</strong>.');\n     if(!s.includes('klant_id')) return err('Koppel de tabellen via het klant_id-veld.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Review-overzicht per klant klaar! Analysts zijn blij. 📋'},
+  // ── NIEUWE SCENARIO'S ─────────────────────────────────────────\n\n  // JOIN scenario (medium)\n  {id:'join_product_review',ch:2,title:'Producten met hun reviews',icon:'⭐',av:'📊',who:'Marketing Manager',\n   story:'Marketing wil een overzicht van <strong>producten met hun gemiddelde reviewscore</strong>. Koppel de tabel product aan review via product_id.',\n   obj:'SELECT p.naam, AVG(r.score) AS gemiddelde FROM product p INNER JOIN review r ON p.product_id = r.product_id GROUP BY p.product_id, p.naam',\n   diff:'medium',lpd:'LPD4',xp:75,tbl:'product',time:60,\n   hint:'SELECT p.naam, AVG(r.score) AS gemiddelde\nFROM product p\nINNER JOIN review r ON p.product_id = r.product_id\nGROUP BY p.product_id, p.naam',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err(t('chk_join_product_review_1'));\n     if(!s.includes('review')) return err('JOIN de tabel <strong>review</strong> via product_id.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN</strong> om product aan review te koppelen.');\n     if(!s.includes('avg')) return err('Gebruik de <strong>AVG()</strong>-functie op de score-kolom.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de productvelden.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Reviewoverzicht klaar! Marketing heeft nu een duidelijk beeld van klanttevredenheid per product. 🌟'},\n\n  // SUBQUERY scenario (hard)\n  {id:'subquery_expensive',ch:3,title:'Producten duurder dan gemiddeld',icon:'💰',av:'💼',who:'Finance Director',\n   story:'Finance wil een lijst van <strong>producten die duurder zijn dan het gemiddelde</strong>. Gebruik een subquery om het gemiddelde te berekenen.',\n   obj:"SELECT naam, prijs FROM product WHERE prijs > (SELECT AVG(prijs) FROM product) ORDER BY prijs DESC",\n   diff:'hard',lpd:'LPD5',xp:110,tbl:'product',time:90,\n   hint:"SELECT naam, prijs\nFROM product\nWHERE prijs > (SELECT AVG(prijs) FROM product)\nORDER BY prijs DESC",\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, prijs FROM product.');\n     if(!s.includes('select avg') && !s.includes('(select')) return err('Gebruik een <strong>subquery</strong> in de WHERE-clausule om het gemiddelde te berekenen');\n     if(!s.includes('avg')) return err('Bereken het gemiddelde met de <strong>AVG()</strong>-functie in de subquery.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     if(!rowCount(res)) return err('Geen resultaten. Controleer je subquery en WHERE-conditie.');\n     return res;\n   },\n   win:'Subquery gemeisterd! Finance heeft nu een lijst van premium producten boven het gemiddelde. 💎'},\n\n  // UPDATE scenario (easy)  \n  {id:'update_email',ch:0,title:'E-mailadres bijwerken',icon:'📧',av:'👤',who:'Klantenservice',\n   story:'Klant Jana Pieters (klant_id=1) heeft haar e-mailadres gewijzigd naar <strong>jana.pieters@nieuw.be</strong>. Update de database.',\n   obj:"UPDATE klant SET email = 'jana.pieters@nieuw.be' WHERE klant_id = 1",\n   diff:'easy',lpd:'LPD2',xp:30,tbl:'klant',time:35,\n   hint:"UPDATE klant\nSET email = 'jana.pieters@nieuw.be'\nWHERE klant_id = 1",\n   sqlType:'update',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('update')) return err('Begin met <strong>UPDATE klant</strong>.');\n     if(!s.includes('klant')) return err('Werk de tabel <strong>klant</strong> bij.');\n     if(!s.includes('email')) return err('Zet de kolom <strong>email</strong> via SET.');\n     if(!s.includes('klant_id')) return err('Voeg een <strong>WHERE</strong>-clausule toe op klant_id — anders worden alle klanten bijgewerkt!');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'E-mail bijgewerkt! Jana kan nu inloggen met haar nieuwe adres. 📬'},\n\n  // SELECT + LIKE (easy)\n  {id:'search_by_email_domain',ch:1,title:'Klanten op e-maildomein zoeken',icon:'🔍',av:'🛡️',who:'IT Security',\n   story:'IT wil alle klanten vinden met een <strong>@mail.be</strong> e-mailadres voor een security-controle.',\n   obj:"SELECT naam, email FROM klant WHERE email LIKE '%@mail.be'",\n   diff:'easy',lpd:'LPD2',xp:35,tbl:'klant',time:40,\n   hint:"SELECT naam, email\nFROM klant\nWHERE email LIKE '%@mail.be'",\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, email.');\n     if(!s.includes('like')) return err('Gebruik <strong>LIKE</strong> voor patroonzoekopdrachten.');\n     if(!s.includes('@mail.be')) return err("Zoek op het patroon <strong>'%@mail.be'</strong> — % matcht alles voor het @.");\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Security-controle klaar! Alle @mail.be klanten gevonden. 🔐'},\n\n  // JOIN + GROUP BY (hard)\n  {id:'revenue_per_customer',ch:4,title:'Omzet per klant berekenen',icon:'💹',av:'📈',who:'CFO',\n   story:'De CFO wil weten hoeveel <strong>elke klant totaal heeft besteld</strong> (som van totaal_prijs). Sorteer op omzet aflopend.',\n   obj:'SELECT k.naam, SUM(b.totaal_prijs) AS omzet FROM klant k INNER JOIN bestelling b ON k.klant_id = b.klant_id GROUP BY k.klant_id, k.naam ORDER BY omzet DESC',\n   diff:'hard',lpd:'LPD5',xp:140,tbl:'bestelling',time:120,\n   hint:'SELECT k.naam, SUM(b.totaal_prijs) AS omzet\nFROM klant k\nINNER JOIN bestelling b ON k.klant_id = b.klant_id\nGROUP BY k.klant_id, k.naam\nORDER BY omzet DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de klantnaam en de berekende totaalwaarde te selecteren.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN bestelling b</strong> om klant aan bestelling te koppelen.');\n     if(!s.includes('sum')) return err('Bereken de totale omzet met de <strong>SUM()</strong>-functie.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de klantvelden.');\n     if(!s.includes('order by')) return err('Sorteer het resultaat aflopend op de berekende omzetkolom.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Omzetranking klaar! De CFO ziet nu wie de top-klanten zijn. 🏆'},\n\n  // ── EXTRA SCENARIO'S (v5) ─────────────────────────────────────\n\n  // Easy SELECT – chapter 0 (beginner-friendly intro)\n  {id:'select_all_products',ch:0,title:'Alle producten bekijken',icon:'📦',av:'👔',who:'Thomas — Adviseur',\n   story:'Je hebt net toegang tot de database. Bekijk alle producten om een overzicht te krijgen van het assortiment.',\n   obj:'SELECT * FROM product',\n   diff:'easy',lpd:'LPD1',xp:15,tbl:'product',time:20,\n   hint:'SELECT *\nFROM product',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met <strong>SELECT</strong>.');\n     if(!s.includes('product')) return err('Haal gegevens op <strong>FROM product</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     if(!rowCount(res)) return err('Geen rijen gevonden. Controleer de tabelnaam.');\n     return res;\n   },\n   win:'Perfect! Je ziet nu alle producten. Zo krijg je snel overzicht. 🎉'},\n\n  // Easy SELECT – chapter 0\n  {id:'count_klanten',ch:0,title:'Hoeveel klanten zijn er?',icon:'🔢',av:'💻',who:'System',\n   story:'Een investeerder vraagt hoeveel klanten DataShop heeft. Tel alle rijen in de klant-tabel.',\n   obj:'SELECT COUNT(*) AS aantal_klanten FROM klant',\n   diff:'easy',lpd:'LPD1',xp:20,tbl:'klant',time:25,\n   hint:'SELECT COUNT(*) AS aantal_klanten\nFROM klant',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT COUNT(*).');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT(*)</strong> om rijen te tellen.');\n     if(!s.includes('klant')) return err('Tel rijen in de tabel <strong>klant</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Geteld! Je weet nu exact hoeveel klanten er zijn. 📊'},\n\n  // Hard JOIN – chapter 3\n  {id:'join_top_products',ch:3,title:'Bestsellers via bestellingen',icon:'🏆',av:'📈',who:'Venture Capitalist',\n   story:'De investeerder wil weten welke producten het vaakst besteld zijn. JOIN product en bestelling, tel bestellingen per product, sorteer aflopend.',\n   obj:'SELECT p.naam, COUNT(b.bestelling_id) AS aantal FROM product p LEFT JOIN bestelling b ON p.product_id = b.product_id GROUP BY p.product_id, p.naam ORDER BY aantal DESC',\n   diff:'hard',lpd:'LPD4',xp:135,tbl:'bestelling',time:120,\n   hint:'SELECT p.naam, COUNT(b.bestelling_id) AS aantal\nFROM product p\nLEFT JOIN bestelling b ON p.product_id = b.product_id\nGROUP BY p.product_id, p.naam\nORDER BY aantal DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de productnaam en het berekende aantal te selecteren.');\n     if(!s.includes('join')) return err('Gebruik een <strong>JOIN</strong> op bestelling via product_id.');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT()</strong> om het aantal bestellingen te tellen.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de productvelden.');\n     if(!s.includes('order by')) return err('Sorteer met <strong>ORDER BY aantal DESC</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Bestseller-ranking klaar! De investor is onder de indruk. 🏆'},\n\n  // Medium UPDATE – chapter 2\n  {id:'update_stock_bulk',ch:2,title:'Stock aanvullen na levering',icon:'🚚',av:'📦',who:'Warehouse Manager',\n   story:'Er is een levering binnengekomen. Verhoog de stock van ALLE producten met categorie "Elektronica" met 10.',\n   obj:"UPDATE product SET stock = stock + 10 WHERE categorie = 'Elektronica'",\n   diff:'medium',lpd:'LPD3',xp:65,tbl:'product',time:55,\n   hint:"UPDATE product\nSET stock = stock + 10\nWHERE categorie = 'Elektronica'",\n   sqlType:'update',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('update')) return err('Begin met <strong>UPDATE product</strong>.');\n     if(!s.includes('stock')) return err('Verhoog de kolom <strong>stock</strong> via SET.');\n     if(!s.includes('+ 10') && !s.includes('+10')) return err('Gebruik <strong>stock + 10</strong> om relatief te verhogen (niet een absoluut getal).');\n     if(!s.includes('elektronica')) return err("Filter op <strong>WHERE categorie = 'Elektronica'</strong>.");\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Voorraad bijgewerkt! Alle elektronica-producten hebben 10 extra stuks. 📦'},\n\n  // Easy SELECT – chapter 1\n  {id:'select_active_products',ch:1,title:'Producten in stock',icon:'✅',av:'🛒',who:'Webshop Team',\n   story:'De webshop toont alleen producten met meer dan 0 stuks op voorraad. Haal alle producten op waar <strong>stock > 0</strong>.',\n   obj:'SELECT naam, prijs, stock FROM product WHERE stock > 0 ORDER BY stock DESC',\n   diff:'easy',lpd:'LPD1',xp:25,tbl:'product',time:30,\n   hint:'SELECT naam, prijs, stock\nFROM product\nWHERE stock > 0\nORDER BY stock DESC',\n   sqlType:'select',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT naam, prijs, stock.');\n     if(!s.includes('product')) return err('Haal op FROM <strong>product</strong>.');\n     if(!s.includes('stock > 0') && !s.includes('stock>0')) return err('Filter op <strong>stock > 0</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Productoverzicht klaar! De webshop toont nu alleen leverbare producten. ✅'},\n\n  // Hard SELECT subquery – chapter 4\n  {id:'subquery_top_customer',ch:4,title:'Klant met meeste bestellingen',icon:'👑',av:'📈',who:'VIP Manager',\n   story:'Zoek de naam van de klant die de <strong>meeste bestellingen</strong> heeft geplaatst. Gebruik een subquery of GROUP BY + LIMIT.',\n   obj:'SELECT k.naam, COUNT(b.bestelling_id) AS totaal FROM klant k JOIN bestelling b ON k.klant_id = b.klant_id GROUP BY k.klant_id, k.naam ORDER BY totaal DESC LIMIT 1',\n   diff:'hard',lpd:'LPD5',xp:145,tbl:'bestelling',time:110,\n   hint:'SELECT k.naam, COUNT(b.bestelling_id) AS totaal\nFROM klant k\nJOIN bestelling b ON k.klant_id = b.klant_id\nGROUP BY k.klant_id, k.naam\nORDER BY totaal DESC\nLIMIT 1',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT om de klantnaam en het berekende aantal te selecteren.');\n     if(!s.includes('join')) return err('Gebruik een <strong>JOIN</strong> op bestelling.');\n     if(!s.includes('count')) return err('Gebruik <strong>COUNT()</strong> om het aantal bestellingen te tellen.');\n     if(!s.includes('group by')) return err('Groepeer met <strong>GROUP BY</strong> op de klantvelden.');\n     if(!s.includes('limit')) return err('Beperk het resultaat tot de eerste rij met <strong>LIMIT</strong>.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'VIP-klant gevonden! Dit is goud voor de marketingafdeling. 👑'},\n\n  // Easy DELETE – chapter 0\n  {id:'delete_test_klant',ch:0,title:'Testklant verwijderen',icon:'🧹',av:'💻',who:'System',\n   story:'Bij de opstart werd een testklant (klant_id=99) aangemaakt. Verwijder die rij.',\n   obj:'DELETE FROM klant WHERE klant_id = 99',\n   diff:'easy',lpd:'LPD2',xp:25,tbl:'klant',time:25,\n   hint:'DELETE FROM klant\nWHERE klant_id = 99',\n   sqlType:'delete',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('delete')) return err('Begin met <strong>DELETE FROM klant</strong>.');\n     if(!s.includes('klant')) return err('Verwijder uit de tabel <strong>klant</strong>.');\n     if(!s.includes('where')) return err('Voeg een <strong>WHERE</strong>-clausule toe op klant_id — anders verwijder je alle klanten!');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Testdata opgeruimd! De database is nu schoon. 🧹'},\n\n  // Medium JOIN – chapter 2\n  {id:'join_klant_review',ch:2,title:'Klanten met hun reviews',icon:'💬',av:'📊',who:'Alex — Data Analyst',\n   story:'Welke klanten hebben reviews geschreven? Gebruik een JOIN om namen en reviewscores samen te tonen.',\n   obj:'SELECT k.naam, r.score, r.tekst FROM klant k INNER JOIN review r ON k.klant_id = r.klant_id ORDER BY r.score DESC',\n   diff:'medium',lpd:'LPD3',xp:75,tbl:'review',time:65,\n   hint:'SELECT k.naam, r.score, r.tekst\nFROM klant k\nINNER JOIN review r ON k.klant_id = r.klant_id\nORDER BY r.score DESC',\n   sqlType:'join',\n   check(sql){\n     const s=norm(sql);\n     if(!s.startsWith('select')) return err('Begin met SELECT k.naam, r.score, r.tekst.');\n     if(!s.includes('join')) return err('Gebruik <strong>INNER JOIN review r</strong>.');\n     if(!s.includes('klant_id')) return err('Koppel de tabellen via het klant_id-veld.');\n     const res=runSQL(sql); if(!res.ok) return err('SQL-fout: '+res.msg);\n     return res;\n   },\n   win:'Review-overzicht per klant klaar! Analysts zijn blij. 📋'},
 
   // ── FEATURE 5: DEBUG MISSIES ──────────────────────────────────────
   // Studenten krijgen een foutieve query en moeten deze repareren
@@ -1623,11 +1632,11 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('sum')) return err('De <code>SUM(stock)</code>-aanroep moet behouden blijven.');
-     if(!s.includes('group by')) return err('De bug is: <strong>GROUP BY ontbreekt</strong>! Voeg <code>GROUP BY categorie</code> toe aan het einde.');
-     if(!s.includes('categorie')) return err('Groepeer op de kolom <strong>categorie</strong>.');
+     if(!s.includes('sum')) return err(t('chk_debug_missing_groupby_1'));
+     if(!s.includes('group by')) return err(t('chk_debug_missing_groupby_2'));
+     if(!s.includes('categorie')) return err(t('chk_debug_missing_groupby_3'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Controleer de GROUP BY-clausule.');
+     if(!rowCount(res)) return err(t('chk_debug_missing_groupby_4'));
      return res;
    },
    win:'Bug gevonden! Zonder GROUP BY kan SUM() niet per categorie berekenen. 🐛→✅'},
@@ -1642,10 +1651,15 @@ const SCENARIOS = [
    sqlType:'update',
    check(sql){
      const s=norm(sql);
-     if(!s.startsWith('update')) return err('De query moet beginnen met <code>UPDATE product</code>.');
-     if(!s.includes('where')) return err('De bug is: <strong>WHERE ontbreekt</strong>! Voeg <code>WHERE product_id = 4</code> toe.');
-     if(!s.includes('prijs')) return err('Behou <code>SET prijs = 99</code> in de query.');
+     if(!s.startsWith('update')) return err(t('chk_debug_update_no_where_1'));
+     if(!s.includes('where')) return err(t('chk_debug_update_no_where_2'));
+     if(!s.includes('prijs')) return err(t('chk_debug_update_no_where_3'));
      const res=runSQL(sql); if(!res.ok) return res;
+     // Fix 7: verify only product_id=4 was changed, not all products
+     const p4 = DB.product.rows.find(r => r.product_id === 4);
+     if (!p4 || p4.prijs !== 99) return err(ti('js_chk_wrong_value', {col: 'prijs', expected: '99', actual: esc(String(p4?.prijs))}));
+     const others = DB.product.rows.filter(r => r.product_id !== 4 && r.prijs === 99);
+     if (others.length > 0) return err(t('chk_debug_update_no_where_4'));
      return res;
    },
    win:'Bug gerepareerd! WHERE is verplicht bij UPDATE. Zonder WHERE worden ALLE rijen aangepast. 🛡️'},
@@ -1660,10 +1674,12 @@ const SCENARIOS = [
    sqlType:'select',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('having')) return err('Behou de <code>HAVING COUNT(*) > 1</code>-clausule.');
-     if(!s.includes('group by')) return err('De bug is: <strong>HAVING vereist een GROUP BY</strong>! Voeg <code>GROUP BY klant_id</code> toe vóór HAVING.');
+     if(!s.includes('having')) return err(t('chk_debug_having_no_groupby_1'));
+     if(!s.includes('group by')) return err(t('chk_debug_having_no_groupby_2'));
      const res=runSQL(sql); if(!res.ok) return res;
-     if(!rowCount(res)) return err('Geen resultaten. Zijn er klanten met meer dan 1 bestelling?');
+     if(!rowCount(res)) return err(t('chk_debug_having_no_groupby_3'));
+     // PED-3: verify the result is actually grouped — each row should represent a group with count > 1
+     if(res.rows && res.rows.length > DB.bestelling.rows.length) return err(t('chk_debug_having_no_groupby_4'));
      return res;
    },
    win:'Bug gevonden! HAVING werkt altijd samen met GROUP BY — zo kun je groepen filteren na aggregatie. 🎯'},
@@ -1678,10 +1694,15 @@ const SCENARIOS = [
    sqlType:'join',
    check(sql){
      const s=norm(sql);
-     if(!s.includes('join')) return err('Behou de <code>INNER JOIN bestelling</code>.');
-     if(!s.includes(' on ')) return err('De bug is: <strong>ON ontbreekt</strong>! Voeg toe: <code>ON klant.klant_id = bestelling.klant_id</code>');
-     if(!s.includes('klant_id')) return err('Koppel via het gemeenschappelijke <strong>klant_id</strong>-veld.');
+     if(!s.includes('join')) return err(t('chk_debug_join_no_on_1'));
+     if(!s.includes(' on ')) return err(t('chk_debug_join_no_on_2'));
+     if(!s.includes('klant_id')) return err(t('chk_debug_join_no_on_3'));
      const res=runSQL(sql); if(!res.ok) return res;
+     // PED-3: verify the result is a proper join, not a cartesian product.
+     // Cartesian would give klant.rows * bestelling.rows (e.g. 6×4=24).
+     // A correct join should give at most bestelling.rows count.
+     const maxExpected = DB.bestelling.rows.length;
+     if(res.rows && res.rows.length > maxExpected * 2) return err(t('chk_debug_join_no_on_4'));
      return res;
    },
    win:'Bug gevonden! Zonder ON-conditie krijg je een Cartesisch product — elke rij gecombineerd met elke rij. 🔗'},
@@ -1692,11 +1713,33 @@ const SCENARIOS = [
 const SC_BY_ID = Object.create(null);
 const SC_BY_CH = Object.create(null);
 const SC_BY_TYPE = Object.create(null);
-SCENARIOS.forEach(s => {
+
+// Fix #2: Extracted registration function so campaign.js (and any other
+// runtime source) can add scenarios AFTER boot without being invisible to
+// SC_BY_ID / SC_BY_CH / SC_BY_TYPE lookups.
+function indexScenario(s) {
   SC_BY_ID[s.id] = s;
-  (SC_BY_CH[s.ch] || (SC_BY_CH[s.ch] = [])).push(s);
-  if (s.sqlType) (SC_BY_TYPE[s.sqlType] || (SC_BY_TYPE[s.sqlType] = [])).push(s);
-});
+  (SC_BY_CH[s.ch]       || (SC_BY_CH[s.ch]       = [])).push(s);
+  if (s.sqlType)
+    (SC_BY_TYPE[s.sqlType] || (SC_BY_TYPE[s.sqlType] = [])).push(s);
+}
+
+SCENARIOS.forEach(indexScenario);  // seed with static data
+
+// Bug #2 fix: Apply translated narrative content to SCENARIOS so English
+// players see English title/story/obj/win/who instead of hardcoded Dutch.
+// Called on boot and again whenever setLang() changes the language.
+function applyNarrativeTranslations() {
+  SCENARIOS.forEach(function(sc) {
+    if (typeof n !== 'function') return;
+    var fields = ['title','story','obj','win','who'];
+    for (var i = 0; i < fields.length; i++) {
+      var val = n(sc.id, fields[i]);
+      if (val) sc[fields[i]] = val;
+    }
+  });
+}
+applyNarrativeTranslations();
 
 const ACHIEVEMENTS = [
   {id:'first_insert', icon:'🎯', name:'Eerste INSERT',      desc:'Je eerste rij toegevoegd.'},
@@ -1759,4 +1802,24 @@ const RANKS = [
 ];
 
 // ── END datashop-data.js ──
+
+// I18N-3 fix: Runtime translator for game data arrays.
+// Called on boot and on language switch (from setLang).
+// Uses t() keys with pattern: ach_{id}_name, ach_{id}_desc, off_{index}_name, etc.
+// Falls back to the hardcoded Dutch if no translation key exists.
+function applyGameDataTranslations() {
+  ACHIEVEMENTS.forEach(function(a) {
+    var n = t('ach_' + a.id + '_name'); if (n !== 'ach_' + a.id + '_name') a.name = n;
+    var d = t('ach_' + a.id + '_desc'); if (d !== 'ach_' + a.id + '_desc') a.desc = d;
+  });
+  OFFICES.forEach(function(o, i) {
+    var n = t('off_' + i + '_name'); if (n !== 'off_' + i + '_name') o.name = n;
+    var d = t('off_' + i + '_desc'); if (d !== 'off_' + i + '_desc') o.desc = d;
+    var p = t('off_' + i + '_perks'); if (p !== 'off_' + i + '_perks') o.perks = p.split('|');
+  });
+  RANKS.forEach(function(r, i) {
+    var tt = t('rank_' + i); if (tt !== 'rank_' + i) r.title = tt;
+  });
+}
+applyGameDataTranslations();
 // Continues in datashop-ui.js

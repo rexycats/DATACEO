@@ -3,15 +3,50 @@
 // UI, APP logic, Timer, Daily, Tutorial, Settings, Theme, Syntax Highlighter, Init, Events
 // Depends on: datashop-engine.js + datashop-data.js
 
+// ── PED-2: PARTIAL SOLUTION MASK ─────────────────────────────────
+// Replaces values in a SQL hint with blanks (___) so students see the
+// structure but must fill in the actual values themselves.
+// Keeps: SQL keywords, table/column names, operators, structure
+// Masks: string literals → '___', standalone numbers → ___
+function maskSolution(sql) {
+  if (!sql) return '___';
+  return sql
+    // Replace quoted strings: 'anything' → '___'
+    .replace(/'[^']*'/g, "'___'")
+    // Replace standalone numbers (not part of column names like product_id)
+    // Matches: = 2, > 50, , 10, (1) etc. but not klant_id or product_2
+    .replace(/(?<=[=><,(\s])\s*\d+\.?\d*(?=[\s,);]|$)/g, ' ___');
+}
+
+
+// ── SEARCH HIGHLIGHT ──────────────────────────────────────────────
+// Fix #1: Build <mark> tags via split() so esc() wraps every text fragment
+// independently. The old approach used .replace() with a $1 capture group,
+// which re-introduced the raw (un-escaped) match into innerHTML.
+function highlightMatch(text, query) {
+  if (!query) return esc(text);
+  const safeQ = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(' + safeQ + ')', 'gi');
+  // split() on a RegExp with a capturing group: odd indices = matched, even = surrounding
+  return text.split(re).map((part, i) =>
+    i % 2 === 1
+      ? `<mark class="search-hl">${esc(part)}</mark>`
+      : esc(part)
+  ).join('');
+}
 
 // ── TIMER ─────────────────────────────────────────────────────────
 const timers  = {};
 const tStart  = {};
+const tEnd    = {};  // BUG-5 fix: track end timestamps for accurate pause/resume
+const tTotal  = {};  // BUG-5 fix: track total duration for restarting
 
 function startTimer(id, secs) {
   clearTimer(id);
   tStart[id] = Date.now();
   const end  = Date.now() + secs * 1000;
+  tEnd[id]   = end;      // BUG-5 fix
+  tTotal[id] = secs;     // BUG-5 fix
   function tick() {
     const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
     const numEl = $('tn-'+id);
@@ -32,7 +67,7 @@ function startTimer(id, secs) {
 
 function clearTimer(id) {
   if (timers[id]) cancelAnimationFrame(timers[id]);
-  delete timers[id]; delete tStart[id];
+  delete timers[id]; delete tStart[id]; delete tEnd[id]; delete tTotal[id];
 }
 
 function clearAllTimers() { Object.keys(timers).forEach(clearTimer); }
@@ -41,20 +76,39 @@ function clearAllTimers() { Object.keys(timers).forEach(clearTimer); }
 // Wanneer een leerling van tab wisselt loopt de timer door in Date.now()
 // maar requestAnimationFrame pauzeert → tijd-delta klopt niet meer.
 // We bewaren de resterende tijd en hervatten correct bij terugkeer.
+// Fix #3: Persist paused timer state to localStorage so a full tab close +
+// reopen can still restore the remaining time instead of losing it.
 const _timerPaused = {};  // id → resterende milliseconden bij pauzeren
+const _TIMER_LS_KEY = 'datashop_timer_paused';
+
+function _saveTimerState() {
+  try { localStorage.setItem(_TIMER_LS_KEY, JSON.stringify(_timerPaused)); }
+  catch(e) {}
+}
+function _restoreTimerState() {
+  try {
+    const raw = localStorage.getItem(_TIMER_LS_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    Object.entries(saved).forEach(([id, left]) => {
+      if (typeof left === 'number' && left > 0) _timerPaused[id] = left;
+    });
+    localStorage.removeItem(_TIMER_LS_KEY);
+  } catch(e) {}
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    // Pauzeer: sla resterende tijd op
+    // Pauzeer: bereken resterende tijd exact via tEnd (BUG-5 fix)
     Object.keys(timers).forEach(id => {
-      const numEl = document.getElementById('tn-' + id);
-      if (numEl) {
-        const left = parseInt(numEl.textContent) || 0;
-        _timerPaused[id] = left;
-      }
+      const left = tEnd[id] ? Math.max(0, Math.ceil((tEnd[id] - Date.now()) / 1000)) : 0;
+      _timerPaused[id] = left;
       cancelAnimationFrame(timers[id]);
       delete timers[id];
     });
+    _saveTimerState();   // persist — survives a full tab close
   } else {
+    _restoreTimerState();  // pick up state from a previous session if needed
     // Hervat: start opnieuw met de bewaarde resterende tijd
     Object.keys(_timerPaused).forEach(id => {
       const left = _timerPaused[id];
@@ -62,6 +116,7 @@ document.addEventListener('visibilitychange', () => {
       if (left > 0) startTimer(id, left);
       else onTimeout(id);
     });
+    _saveTimerState();   // clear persisted state now that timers are running again
   }
 });
 
@@ -69,18 +124,18 @@ function onTimeout(id) {
   const fb = $('fb-'+id);
   const sc = SC_BY_ID[id];
   const typeHints = {
-    select: 'Begin met <code>SELECT kolommen FROM tabel WHERE …</code>',
-    insert: 'Begin met <code>INSERT INTO tabel (kolommen) VALUES (…)</code>',
-    update: 'Begin met <code>UPDATE tabel SET kolom = waarde WHERE …</code> — vergeet WHERE niet!',
-    delete: 'Begin met <code>DELETE FROM tabel WHERE …</code> — vergeet WHERE niet!',
-    ddl:    'Gebruik <code>CREATE TABLE naam (…)</code> of <code>ALTER TABLE naam ADD COLUMN …</code>',
+    select: t('js_timeout_nudge_select'),
+    insert: t('js_timeout_nudge_insert'),
+    update: t('js_timeout_nudge_update'),
+    delete: t('js_timeout_nudge_delete'),
+    ddl:    t('js_timeout_nudge_ddl'),
   };
   const nudge = sc ? (typeHints[sc.sqlType] || typeHints.select) : typeHints.select;
   if (fb) {
     fb.className='feedback hint visible';
-    fb.innerHTML=`⏰ <strong>${t('js_timeout_title')}</strong> SQL schrijven kost oefening.<br>
+    setFbHTML(fb, `⏰ <strong>${t('js_timeout_title')}</strong> ${t('js_timeout_practice')}<br>
       <span class="u-label-sm">💡 ${t('js_timeout_tip')} ${nudge}</span><br>
-      <span class="u-muted">${t('js_timeout_hint')}</span>`;
+      <span class="u-muted">${t('js_timeout_hint')}</span>`);
   }
   // Geen reputatieschade bij timeout — tijdsdruk mag niet demotiveren
   UI.addEvent('warn', t('js_timeout_event'));
@@ -130,6 +185,12 @@ const UI = {
   showRepWarning() {
     const popup = document.createElement('div');
     popup.className = 'rep-warning-popup';
+    let autoTimer = null;
+    const dismiss = () => {
+      if (autoTimer) clearTimeout(autoTimer);
+      popup.classList.remove('visible');
+      setTimeout(() => popup.remove(), 400);
+    };
     const emoji = document.createElement('div');
     emoji.className = 'rep-critical-popup-emoji';
     setText(emoji, '😱');
@@ -142,17 +203,14 @@ const UI = {
     const btn = document.createElement('button');
     btn.className = 'btn btn-danger btn-sm';
     setText(btn, t('js_rep_critical_btn'));
-    btn.addEventListener('click', function() {
-      popup.classList.remove('visible');
-      setTimeout(() => popup.remove(), 400);
-    });
+    btn.addEventListener('click', dismiss);
     popup.appendChild(emoji);
     popup.appendChild(title);
     popup.appendChild(body);
     popup.appendChild(btn);
     document.body.appendChild(popup);
     setTimeout(() => popup.classList.add('visible'), 50);
-    setTimeout(() => { popup.classList.remove('visible'); setTimeout(() => popup.remove(), 400); }, 5000);
+    autoTimer = setTimeout(dismiss, 5000);
   },
 
   // O15: Cached DateTimeFormat — avoids creating Intl instance per event
@@ -394,7 +452,7 @@ const UI = {
           <div class="sc-icon" data-sqltype="${sc.sqlType||''}" data-diff="${sc.diff||''}">${sc.icon}</div>
           <div class="sc-meta">
             <div class="sc-title-row">
-              <span class="sc-title">${UI.searchQuery ? esc(sc.title).replace(new RegExp('(' + UI.searchQuery.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'gi'), '<mark class="search-hl">$1</mark>') : esc(sc.title)}</span>
+              <span class="sc-title">${highlightMatch(sc.title, UI.searchQuery)}</span>
               ${isDone?`<span class="tag tag-done">${t('js_sc_done_tag')}</span>`:''}
               ${sc.urgent&&!isDone?'<span class="tag tag-urgent">Urgent</span>':''}
               ${sc.type==='debug'?'<span class="debug-badge">DEBUG</span>':''}
@@ -433,7 +491,7 @@ const UI = {
             <div class="story-avatar">${sc.av}</div>
             <div>
               <div class="story-who">${esc(sc.who)}</div>
-              <div class="story-text">${sc.story}</div>
+              <div class="story-text">${sanitizeHTML(sc.story)}</div>
             </div>
           </div>
           ${sc.type==='debug'&&sc.buggyQuery?`<div class="debug-buggy-code"><span class="debug-buggy-label">🐛 FOUTIEVE QUERY — repareer dit:</span>${esc(sc.buggyQuery)}</div>`:''}
@@ -462,21 +520,21 @@ const UI = {
               return `<div class="sc-steps-nav">${stepsNav}</div>
               <div class="hl-wrap">
                 <div class="hl-backdrop" id="hl-${sc.id}" role="presentation" aria-hidden="true"></div>
-                <textarea class="sql-editor" id="sq-${sc.id}"
-                  placeholder="-- ${esc(sc.steps[Math.min(stepsDone, sc.steps.length-1)].placeholder || 'Schrijf hier je SQL...')}"
+                <textarea class="sql-editor" id="sq-${sc.id}" maxlength="4000"
+                  placeholder="-- ${esc(sc.steps[Math.min(stepsDone, sc.steps.length-1)].placeholder || t('js_sc_step_placeholder'))}"
                   ${isDone?'disabled':''}></textarea>
               </div>`;
             })() : `<div class="hl-wrap">
               <div class="hl-backdrop" id="hl-${sc.id}" role="presentation" aria-hidden="true"></div>
-              <textarea class="sql-editor" id="sq-${sc.id}"
-                placeholder="${sc.type==='debug'?'-- Repareer de query hierboven...&#10;-- Ctrl+Enter om uit te voeren':'-- Schrijf hier je SQL...&#10;-- Ctrl+Enter om uit te voeren'}"
+              <textarea class="sql-editor" id="sq-${sc.id}" maxlength="4000"
+                placeholder="${sc.type==='debug'?esc(t('js_sc_debug_placeholder')):esc(t('js_sc_placeholder'))}"
                 ${isDone?'disabled':''}></textarea>
             </div>`}
             <div class="term-footer">
               <span class="term-hint">Ctrl+Enter</span>
               ${!isDone?`<button class="btn btn-outline btn-xs" id="hbtn-${sc.id}" data-action="show-hint" data-sc="${sc.id}">💡 Hint ①②③</button>`:''}
               ${!isDone?`<button class="btn btn-primary btn-sm" data-action="run-sc" data-sc="${sc.id}">▶ Uitvoeren</button>`:''}
-              ${isDone?`<button class="sc-replay-btn" aria-label="Opnieuw oefenen" data-action="replay-sc" data-sc="${sc.id}">↩ Oefenen</button>`:''}
+              ${isDone?`<button class="sc-replay-btn" aria-label="${esc(t('js_replay_aria'))}" data-action="replay-sc" data-sc="${sc.id}">${t('js_replay_btn')}</button>`:''}
             </div>
           </div>
           <div class="feedback" id="fb-${sc.id}"></div>
@@ -531,7 +589,7 @@ const UI = {
       return `<div class="ach-tile ${got?'unlocked':''} ${fresh?'just-unlocked':''}">
         <span class="ach-icon">${a.icon}</span>
         <div class="ach-name">${got?esc(a.name):'???'}</div>
-        <div class="ach-desc">${got?esc(a.desc):'Geheim...'}</div>
+        <div class="ach-desc">${got?esc(a.desc):t('ach_hidden')}</div>
       </div>`;
     }).join('');
   },
@@ -603,9 +661,10 @@ const UI = {
       if (this._dirty.table) { this.renderCurrentTable(); this._dirty.table = false; }
     }
     if (name==='ach' && this._dirty.ach) { this.renderAchs(); this._dirty.ach = false; }
-    if (name==='daily') { DAILY.render(); setTimeout(() => { ['easy','medium','hard'].forEach(d => { const ta = $('daily-sql-'+d); if(ta) initHighlighter(ta); }); }, 80); }
+    if (name==='camp') { try { CAMP.init(); CAMP.render(); } catch(e) { console.warn('Campaign render error on panel show', e); } }
+    if (name==='daily') { try { DAILY.render(); setTimeout(() => { ['easy','medium','hard'].forEach(d => { const ta = $('daily-sql-'+d); if(ta) initHighlighter(ta); }); }, 80); } catch(e) { console.warn('Daily render error', e); } }
     if (name==='set')   { SET.render(); SET.afterRender(); }
-    if (name==='tut')   { TUT.render(); }
+    if (name==='tut')   { try { TUT.render(); } catch(e) { console.warn('Tutorial render error', e); } }
     if (name==='sc')    { setTimeout(initAllHighlighters, 80); }
     if (name==='term')  {
       setTimeout(()=>initHighlighter(EL['free-sql']), 50);
@@ -891,7 +950,18 @@ const APP = {
       if (!UI.hintL3Used) UI.hintL3Used = {};
       delete UI.hintL3Used[id]; // reset L3 flag bij heropenen
       const sc = SC_BY_ID[id];
-      if (sc && sc.time && !G.done.has(id)) startTimer(id, sc.time);
+      // ECO-4: Timer starts on first keystroke, not on card open.
+      // This gives students reading time without penalising speed bonus.
+      if (sc && sc.time && !G.done.has(id)) {
+        const ta = $('sq-'+id);
+        if (ta && !ta._timerBound) {
+          ta._timerBound = true;
+          ta.addEventListener('input', function _startOnInput() {
+            ta.removeEventListener('input', _startOnInput);
+            if (!G.done.has(id) && !tStart[id]) startTimer(id, sc.time);
+          }, { once: true });
+        }
+      }
       // Mark concept as seen so the intro box only appears once per concept type
       const conceptKey = sc && (sc.conceptType || sc.sqlType);
       if (conceptKey && !seenConcept(conceptKey)) {
@@ -947,7 +1017,7 @@ const APP = {
     const _hBtn = $('hbtn-' + id);
     if (_hBtn) { _hBtn.innerHTML = t('js_hint_btn'); _hBtn.classList.remove('hint-btn-warning', 'hint-btn-exhausted'); }
     if (lbl) lbl.textContent = 'datashop_db › ' + (SC_BY_ID[id]?.tbl||'sql');
-    UI.addEvent('info', `↩ Missie <strong>${esc(SC_BY_ID[id]?.title||id)}</strong> geopend voor oefening.`);
+    UI.addEvent('info', ti('js_replay_event', {title: esc(SC_BY_ID[id]?.title||id)}));
     // Start fresh timer for practice
     const sc = SC_BY_ID[id];
     if (sc?.time) startTimer(id, sc.time);
@@ -992,8 +1062,11 @@ const APP = {
     const obj = sc.obj || '';
     const columnHint = `${t('js_hint_lv2_prefix')}${tblHint}${obj ? t('js_hint_lv2_goal') + esc(obj) + t('js_hint_lv2_goal2') : t('js_hint_lv2_fallback')}`;
 
-    // Level 3 — Near-solution (costs XP bonus!)
-    const solHint = `${t('js_hint_lv3_prefix')}<code class="hint-solution-code">${esc(currentHint || sc.hint || '')}</code>`;
+    // Level 3 — Partial solution with blanks (PED-2: costs XP bonus!)
+    // Shows the query structure but masks values so students still need to think.
+    const fullSol = currentHint || sc.hint || '';
+    const maskedSol = maskSolution(fullSol);
+    const solHint = `${t('js_hint_lv3_prefix')}<code class="hint-solution-code">${esc(maskedSol)}</code>`;
 
     const hints     = [structureHints[sqlType] || structureHints.select, columnHint, solHint];
     const stepNames = [t('js_hint_step_struct'), t('js_hint_step_cols'), t('js_hint_step_sol')];
@@ -1050,6 +1123,21 @@ const APP = {
     const fb  = $('fb-'+id);
     if (!sql) { fb.className='feedback err visible'; fb.textContent=t('js_write_sql_first'); return; }
 
+    // Fix #6: Reject absurdly long input before it reaches the regex-heavy parser.
+    // 4 000 chars is generous — a realistic teaching query tops out well under 500.
+    const MAX_SQL_LEN = 4000;
+    if (sql.length > MAX_SQL_LEN) {
+      fb.className = 'feedback err visible';
+      fb.textContent = `⚠️ Je query is te lang (${sql.length} tekens). Houd het onder ${MAX_SQL_LEN} tekens.`;
+      return;
+    }
+
+    // Fix: Replay guard — snapshot DB before check() so replay doesn't persist mutations.
+    // Multi-step scenarios are excluded: their steps build on each other's mutations,
+    // and the snapshot would break step 2 if step 1 was an INSERT/UPDATE.
+    const _isReplay = G.done.has(id) && !sc.steps;
+    const _dbSnapshot = _isReplay ? structuredClone(DB) : null;
+
     // ── Multi-step scenario handler ────────────────────────────────
     if (sc.steps) {
       if (!G.stepsDone) G.stepsDone = {};
@@ -1105,7 +1193,7 @@ const APP = {
           const ta = $('sq-'+id);
           if (ta) {
             ta.value = '';
-            ta.placeholder = '-- ' + (sc.steps[stepIdx+1].placeholder || 'Schrijf hier je SQL...');
+            ta.placeholder = '-- ' + (sc.steps[stepIdx+1].placeholder || t('js_sc_step_placeholder'));
           }
           UI.renderScenarios(); // refresh step nav indicators
           // Re-init highlighter for the refreshed textarea
@@ -1120,8 +1208,15 @@ const APP = {
         const extraMsg = G.consecutiveErrors >= 2
           ? `<br><span class="u-mono-muted">${t('js_two_errors')}</span>` : '';
         setFbHTML(fb, `❌ ${countdown}${extraMsg}`);
+        markSQLError($('sq-'+id), res.msg);
         if (G.consecutiveErrors >= 2) {
-          G.streak = 0; G.consecutiveErrors = 0; UI.updateXP();
+          if (useStreakShield()) {
+            UI.addEvent('info', `🛡️ ${t('js_shield_used')} (${G.streakShields} ${t('js_shield_remaining')})`);
+            G.consecutiveErrors = 0;
+          } else {
+            G.streak = 0; G.consecutiveErrors = 0;
+          }
+          UI.updateXP();
         }
         // Tutorial link on error
         const oldTutLink = fb.parentNode.querySelector('.sc-tut-err-link');
@@ -1138,6 +1233,13 @@ const APP = {
     }
 
     const res = sc.check(sql);
+
+    // Fix: Restore DB after replay so mutations don't persist.
+    // The res object already captured the check result — feedback uses res, not DB.
+    if (_isReplay && _dbSnapshot) {
+      for (const k of Object.keys(DB)) { if (!_dbSnapshot[k]) delete DB[k]; }
+      for (const [k,v] of Object.entries(_dbSnapshot)) { DB[k] = v; }
+    }
 
     if (res.ok) {
       // Feature 3: Result-based validation (O2: pass existing res, no re-run)
@@ -1245,6 +1347,8 @@ const APP = {
         res.msg.includes('Begin met') || res.msg.includes('vergeten') ||
         res.msg.includes('verplicht') || res.msg.includes('ontbreekt')
       );
+      // Inline error marking in the editor
+      markSQLError($('sq-'+id), res.msg);
       if (isSyntaxErr) {
         setFbHTML(fb, '⚠️ ' + res.msg + `<br><span class="u-mono-muted">${t('js_streak_intact')}</span>`);
         UI.damageRep(GAME_CONFIG.repDamageSyntax);
@@ -1254,11 +1358,18 @@ const APP = {
         G.consecutiveErrors = (G.consecutiveErrors || 0) + 1;
         UI.damageRep(GAME_CONFIG.repDamageLogic);
         if (G.consecutiveErrors >= GAME_CONFIG.consecutiveErrorsToReset) {
-          setFbHTML(fb, '❌ ' + res.msg + `<br><span class="u-mono-muted">${t('js_two_errors')} (was ${G.streak}) 🔥</span>`);
-          G.streak = 0;
-          G.consecutiveErrors = 0;
-          UI.updateXP();
-          UI.addEvent('err', t('js_error_streak_reset'));
+          if (useStreakShield()) {
+            setFbHTML(fb, '❌ ' + res.msg + `<br><span class="u-mono-muted">🛡️ ${t('js_shield_used')} (${G.streakShields} ${t('js_shield_remaining')}) — ${t('js_streak_saved')} (${G.streak}🔥)</span>`);
+            G.consecutiveErrors = 0;
+            UI.updateXP();
+            UI.addEvent('info', `🛡️ ${t('js_shield_used')}`);
+          } else {
+            setFbHTML(fb, '❌ ' + res.msg + `<br><span class="u-mono-muted">${t('js_two_errors')} (was ${G.streak}) 🔥</span>`);
+            G.streak = 0;
+            G.consecutiveErrors = 0;
+            UI.updateXP();
+            UI.addEvent('err', t('js_error_streak_reset'));
+          }
         } else {
           setFbHTML(fb, '❌ ' + res.msg + `<br><span class="fb-streak-warning">${t('js_streak_warning')} (${G.streak}🔥) ${t('js_streak_reset')}</span>`);
           UI.addEvent('warn', t('js_small_error'));
@@ -1411,9 +1522,22 @@ const APP = {
     ctx.font = '56px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('🏆', W/2, 390);
-    // Download
+    // SEC-1: Verification hash — teachers can cross-check this against the student's save
+    ctx.font = '9px monospace';
+    ctx.fillStyle = '#1e2d45';
+    const verifyData = `${G.name}|${G.xp}|${G.done.size}|${G.ach.size}|${G.rep}`;
+    const verifyHash = typeof _fnv1a === 'function' ? _fnv1a(verifyData) : '?';
+    ctx.fillText(`Verificatie: ${verifyHash}`, W/2, 480);
+    // SEC-1: Tamper warning if integrity check failed
+    if (G._tampered) {
+      ctx.fillStyle = '#dc2626';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText('⚠ INTEGRITEITSCONTROLE MISLUKT — gegevens mogelijk aangepast', W/2, 495);
+    }
+    // Download — NEW-BUG-5 fix: sanitize filename to remove unsafe characters
+    const safeName = G.name.replace(/[^a-zA-Z0-9_\- ]/g, '').replace(/\s+/g, '-') || 'ceo';
     const a = document.createElement('a');
-    a.download = `certificaat-${G.name.replace(/\s+/g,'-')}.png`;
+    a.download = `certificaat-${safeName}.png`;
     a.href = canvas.toDataURL();
     a.click();
   },
@@ -1516,9 +1640,11 @@ const APP = {
     if (s.includes('inner join')) UI.unlockAch('inner_join_pro');
     if (s.includes('left join'))  UI.unlockAch('left_join_pro');
     if (s.includes('having'))     UI.unlockAch('having_pro');
-    // ddl_architect: ontgrendel wanneer de query DDL is
-    // (ddl_master wordt eerst ontgrendeld in dezelfde aanroep, G.ach wordt synchroon bijgewerkt)
-    if (s.includes('create table') || s.includes('alter table')) UI.unlockAch('ddl_architect');
+    // ddl_architect: requires BOTH create table AND alter table across all solved missions.
+    // Track which DDL types have been used via seenKeywords so it persists across sessions.
+    if (s.includes('create table')) { G.seenKeywords.add('_ddl_create'); }
+    if (s.includes('alter table'))  { G.seenKeywords.add('_ddl_alter'); }
+    if (G.seenKeywords.has('_ddl_create') && G.seenKeywords.has('_ddl_alter')) UI.unlockAch('ddl_architect');
     if (G.xp>=1000) UI.unlockAch('xp1000');
     // Eerste gebruik van een geavanceerd keyword — toon een mini-popup
     this.checkNewKeyword(sql);
@@ -1573,6 +1699,12 @@ const APP = {
     const fb  = EL['free-fb'];
     const out = EL['free-out'];
     if (!sql) return;
+    // Fix #6: Guard against runaway input before hitting the parser
+    if (sql.length > 4000) {
+      fb.className = 'feedback err visible';
+      fb.textContent = `⚠️ Query te lang (${sql.length} tekens, max 4000).`;
+      return;
+    }
     // Save to history
     if (!_qHistory.length || _qHistory[0] !== sql) { _qHistory.unshift(sql); if (_qHistory.length > 20) _qHistory.pop(); }
     _qHistIdx = -1;
@@ -1595,6 +1727,7 @@ const APP = {
         helpHint = `<br><small class="sql-help-warn">${t('js_warn_delete_no_where')}</small>`;
       }
       setFbHTML(fb, '❌ ' + esc(errMsg) + helpHint);
+      markSQLError(EL['free-sql'], errMsg);
       setHTML(out, `<div class="u-empty-state">${t('js_query_failed')}</div>`);
       return;
     }
@@ -2136,7 +2269,7 @@ const DAILY = {
           <div class="daily-icon-wrap daily-icon-wrap--${diff}">${sc.icon}</div>
           <div class="daily-card-info">
             <div class="daily-meta-title">${esc(sc.title)}</div>
-            <div class="daily-card-story" id="daily-story-${diff}">${sc.story}</div>
+            <div class="daily-card-story" id="daily-story-${diff}">${sanitizeHTML(sc.story)}</div>
             <button class="daily-story-toggle" data-action="toggle-daily-story" data-diff="${diff}">↓ Meer lezen</button>
           </div>
         </div>
@@ -2148,11 +2281,23 @@ const DAILY = {
             ${sc.time ? `<span class="tag tag-time">⏱ ${sc.time}s</span>` : ''}
           </div>
         </div>
+        <div class="daily-tables-toggle-wrap">
+          <button class="btn btn-outline btn-sm daily-tables-btn" data-action="toggle-daily-tables" data-diff="${diff}">
+            ${t('js_daily_view_tables')}
+          </button>
+          <div class="daily-tables-panel hidden" id="daily-tables-${diff}">
+            ${Object.keys(DB).map(tbl => `
+              <details class="daily-table-details">
+                <summary class="daily-table-summary">${tbl}</summary>
+                <div class="daily-table-inner">${renderTableHTML(tbl)}</div>
+              </details>`).join('')}
+          </div>
+        </div>
         <div class="daily-sql-wrap">
           <div class="hl-wrap">
             <div class="hl-backdrop" id="hl-daily-${diff}" role="presentation" aria-hidden="true"></div>
             <textarea id="daily-sql-${diff}" class="sql-editor daily-sql-ta" rows="4"
-              placeholder="-- Schrijf je SQL hier...&#10;-- Ctrl+Enter om uit te voeren" spellcheck="false"></textarea>
+              placeholder="${esc(t('js_sc_placeholder'))}" spellcheck="false"></textarea>
           </div>
           <div id="daily-fb-${diff}" class="feedback"></div>
           <button class="btn btn-primary btn-sm daily-run-btn" id="daily-run-${diff}" data-action="daily-run" data-diff="${diff}">▶ Uitvoeren</button>
@@ -2170,6 +2315,12 @@ const DAILY = {
     const fb = $('daily-fb-'+diff);
     if (!fb) return;
     if (!sql) { fb.className='feedback err visible'; fb.textContent=t('js_write_sql_first'); return; }
+    // Fix #6: Guard against runaway input
+    if (sql.length > 4000) {
+      fb.className = 'feedback err visible';
+      fb.textContent = `⚠️ Query te lang (${sql.length} tekens, max 4000).`;
+      return;
+    }
     if (this.isDoneToday(diff)) {
       fb.className='feedback hint visible';
       fb.textContent=`✅ ${t('js_daily_completed3')}`;
@@ -2771,6 +2922,20 @@ const TUT = {
         </div>`;
     }).join('');
 
+    // Invalidate cached references to elements inside tut-content.
+    // They are destroyed by the innerHTML assignment below, so the next
+    // call to _runExercise must get fresh DOM refs — not the old detached
+    // (and possibly disabled) textarea from the previous lesson.
+    ['tut-ex-sql', 'tut-ex-fb'].forEach(id => {
+      let _c = null;
+      try {
+        Object.defineProperty(EL, id, {
+          get() { if (!_c) _c = document.getElementById(id); return _c; },
+          enumerable: true, configurable: true
+        });
+      } catch(e) { delete EL[id]; }
+    });
+
     el.innerHTML = `
       <div class="tut-layout">
         <div class="tut-lesson-col">
@@ -2826,7 +2991,7 @@ const TUT = {
                 </div>
                 <div class="hl-wrap">
                   <div class="hl-backdrop" id="hl-tut-ex" aria-hidden="true"></div>
-                  <textarea class="sql-editor tut-ex-textarea" id="tut-ex-sql" placeholder="-- Schrijf hier je SQL..."
+                  <textarea class="sql-editor tut-ex-textarea" id="tut-ex-sql" placeholder="${esc(t('js_tut_placeholder'))}"
                     ${isDone ? ' disabled' : ''}></textarea>
                 </div>
                 <div class="tut-exercise-action-row">
@@ -2857,8 +3022,13 @@ const TUT = {
       </div>`;
 
     // Syntax highlighter
+    // FIX: Na el.innerHTML vervanging bestaat er een nieuw #tut-ex-sql in het DOM.
+    // EL['tut-ex-sql'] cached het OUDE (losgelaten) element — initHighlighter stopt
+    // dan meteen want ta._hlInit===true op dat oude element. Oplossing:
+    // flush de cache en gebruik document.getElementById direct.
+    if (typeof EL !== 'undefined' && EL._flush) EL._flush();
     setTimeout(() => {
-      const ta = EL['tut-ex-sql'];
+      const ta = document.getElementById('tut-ex-sql');
       if (ta) initHighlighter(ta);
     }, 60);
   },
@@ -2873,7 +3043,9 @@ const TUT = {
     const m = TUT_MODULES.find(x => x.id === this._activeMod);
     if (!m) return;
     // Re-render to enable the textarea again (don't remove from tutDone to keep progress)
-    const ta = EL['tut-ex-sql'];
+    // FIX: gebruik getElementById zodat we altijd het actuele DOM-element pakken,
+    // niet het gecachte (mogelijk stale) element uit EL.
+    const ta = document.getElementById('tut-ex-sql') || EL['tut-ex-sql'];
     if (ta) {
       ta.disabled = false;
       ta.value = '';
@@ -2926,12 +3098,13 @@ const TUT = {
     const m = TUT_MODULES.find(x => x.id === this._activeMod);
     if (!m) return;
     const les = m.lessons[this._activeLes];
-    const sql = (EL['tut-ex-sql'] || {}).value?.trim() || '';
+    // FIX: gebruik getElementById zodat we altijd het actuele DOM-element pakken.
+    const ta = document.getElementById('tut-ex-sql') || EL['tut-ex-sql'];
+    const sql = (ta || {}).value?.trim() || '';
     const fb = $('tut-ex-fb');
     if (!sql) { fb.className = 'feedback err visible'; fb.textContent = t('js_write_sql_first'); return; }
 
     // Sla vorige poging op als ghost (voor iteratief verbeteren)
-    const ta = EL['tut-ex-sql'];
     if (ta && !ta.dataset.lastAttempt) ta.dataset.lastAttempt = '';
     const prevAttempt = ta ? ta.dataset.lastAttempt : '';
     if (ta) ta.dataset.lastAttempt = sql;
@@ -3162,11 +3335,17 @@ const SET = {
   confirmReset() { const el=$('set-reset-confirm'); if(el) { el.classList.remove('overlay-hidden'); } },
   cancelReset()  { const el=$('set-reset-confirm'); if(el) { el.classList.add('overlay-hidden'); } },
   doReset() {
+    // Block any pending debounced save from writing old data back after we clear
+    if (typeof _resetPending !== 'undefined') { _resetPending = true; }
     try {
       localStorage.removeItem('datashop_v3');
+      localStorage.removeItem('datashop_v3_chk');  // SEC-1: integrity checksum
       localStorage.removeItem('datashop_daily_v2');
+      localStorage.removeItem('datashop_daily_history');
       localStorage.removeItem('datashop_opensc');
       localStorage.removeItem('datashop_campaign');
+      localStorage.removeItem('datashop_camp_timer');
+      localStorage.removeItem('datashop_timer_paused');
       localStorage.removeItem('datashop_theme');
       localStorage.removeItem('datashop_lang');
     } catch(e) {}
@@ -3214,16 +3393,36 @@ const SET = {
             alert(t('js_import_invalid'));
             return;
           }
+          // Bug #7 fix: structural validation of imported fields
+          if (typeof data.name !== 'string' || typeof data.version !== 'string') { alert(t('js_import_invalid')); return; }
+          if (data.xp !== undefined && (typeof data.xp !== 'number' || data.xp < 0)) { alert(t('js_import_invalid')); return; }
+          if (data.rep !== undefined && (typeof data.rep !== 'number' || data.rep < 0 || data.rep > 100)) { alert(t('js_import_invalid')); return; }
+          if (data.streak !== undefined && (typeof data.streak !== 'number' || data.streak < 0)) { alert(t('js_import_invalid')); return; }
+          if (data.done !== undefined && !Array.isArray(data.done)) { alert(t('js_import_invalid')); return; }
+          if (data.ach !== undefined && !Array.isArray(data.ach)) { alert(t('js_import_invalid')); return; }
+          if (data.tutDone !== undefined && !Array.isArray(data.tutDone)) { alert(t('js_import_invalid')); return; }
+          if (data.xpHistory !== undefined && !Array.isArray(data.xpHistory)) { alert(t('js_import_invalid')); return; }
+          if (data.stepsDone !== undefined && (typeof data.stepsDone !== 'object' || Array.isArray(data.stepsDone))) { alert(t('js_import_invalid')); return; }
+          // SEC-4: Filter done/ach to only contain known scenario/achievement IDs
+          const validScIds = typeof SC_BY_ID !== 'undefined' ? SC_BY_ID : {};
+          const validAchIds = typeof ACHIEVEMENTS !== 'undefined' ? new Set(ACHIEVEMENTS.map(a => a.id)) : null;
+          const safeDone = Array.isArray(data.done) ? data.done.filter(id => typeof id === 'string' && validScIds[id]) : [];
+          const safeAch = Array.isArray(data.ach) ? data.ach.filter(id => typeof id === 'string' && (!validAchIds || validAchIds.has(id))) : [];
           // Restore main game state
-          localStorage.setItem('datashop_v3', JSON.stringify({
+          const importPayload = JSON.stringify({
             name:data.name, xp:data.xp, rep:data.rep, streak:data.streak,
-            done:data.done, ach:data.ach,
+            done:safeDone, ach:safeAch,
             tutDone:data.tutDone||[], hintsUsedChs:data.hintsUsedChs||[],
             seenConcepts:data.seenConcepts||[], seenKeywords:data.seenKeywords||[],
             chRecapSeen:data.chRecapSeen||[], stepsDone:data.stepsDone||{},
             streakShields:data.streakShields||0, weekStreak:data.weekStreak||0,
             correctThisWeek:data.correctThisWeek||0, xpHistory:data.xpHistory||[],
-          }));
+          });
+          localStorage.setItem('datashop_v3', importPayload);
+          // SEC-1: Generate fresh integrity checksum for imported data
+          if (typeof _computeChecksum === 'function') {
+            localStorage.setItem('datashop_v3_chk', _computeChecksum(importPayload));
+          }
           // Restore campaign
           if (data.campaign) localStorage.setItem('datashop_campaign', JSON.stringify(data.campaign));
           // Restore daily
@@ -3240,9 +3439,20 @@ const SET = {
 };
 
 // ── KEYBOARD SHORTCUTS ────────────────────────────────────────────
+// SEC-3: Debounce SQL execution to prevent rapid-fire spam
+let _lastExecTime = 0;
+const _EXEC_DEBOUNCE_MS = 200;
+function _canExecSQL() {
+  const now = Date.now();
+  if (now - _lastExecTime < _EXEC_DEBOUNCE_MS) return false;
+  _lastExecTime = now;
+  return true;
+}
+
 document.addEventListener('keydown', e => {
   // Ctrl+Enter: run query in terminal or active scenario
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    if (!_canExecSQL()) { e.preventDefault(); return; }
     const active = document.querySelector('.panel.on');
     if (active?.id === 'panel-term') { e.preventDefault(); APP.runFree(); return; }
     if (UI.openSc) { e.preventDefault(); APP.runSc(UI.openSc); return; }
@@ -3347,6 +3557,25 @@ function initHighlighter(ta) {
     hlLayer.classList.add('sql-highlight-layer');
   }
 
+  // ── LINE NUMBERS ──
+  const outerWrap = wrap || ta.closest('.sq-wrap');
+  let gutter = null;
+  if (outerWrap) {
+    gutter = document.createElement('div');
+    gutter.className = 'hl-gutter';
+    gutter.setAttribute('aria-hidden', 'true');
+    outerWrap.classList.add('has-gutter');
+    outerWrap.insertBefore(gutter, outerWrap.firstChild);
+  }
+
+  function updateLineNumbers() {
+    if (!gutter) return;
+    const lines = (ta.value || '').split('\n').length;
+    const nums = [];
+    for (let i = 1; i <= Math.max(lines, 1); i++) nums.push(`<span>${i}</span>`);
+    gutter.innerHTML = nums.join('');
+  }
+
   // Copy relevant styles from textarea to layer
   const taStyle = getComputedStyle(ta);
   hlLayer.style.padding = taStyle.padding;
@@ -3355,22 +3584,57 @@ function initHighlighter(ta) {
   hlLayer.style.fontFamily = taStyle.fontFamily;
   hlLayer.style.minHeight = taStyle.minHeight || '130px';
   hlLayer.style.height = taStyle.height;
+  if (gutter) {
+    gutter.style.fontSize = '12px';
+    gutter.style.lineHeight = taStyle.lineHeight;
+  }
+
+  // ── ERROR MARK STATE ──
+  ta._sqlErrToken = null; // set by markSQLError(), cleared on input
 
   function sync() {
     const val = ta.value;
-    hlLayer.innerHTML = sqlHighlight(val) + '\n'; // trailing newline prevents scroll drift
+    let highlighted = sqlHighlight(val);
+    // Apply inline error mark if set
+    if (ta._sqlErrToken) {
+      const errEsc = ta._sqlErrToken
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      // Wrap first occurrence of the error token in the highlighted output
+      // We need to match the raw text inside spans or outside them
+      const errRe = new RegExp('(' + errEsc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'i');
+      highlighted = highlighted.replace(errRe, '<span class="hl-err">$1</span>');
+    }
+    hlLayer.innerHTML = highlighted + '\n';
     // Sync scroll
     hlLayer.scrollTop = ta.scrollTop;
     hlLayer.scrollLeft = ta.scrollLeft;
     // Sync height if auto-expanding
     hlLayer.style.height = ta.offsetHeight + 'px';
+    updateLineNumbers();
+    if (gutter) gutter.scrollTop = ta.scrollTop;
   }
 
-  ta.addEventListener('input', sync);
+  ta.addEventListener('input', () => {
+    ta._sqlErrToken = null; // clear error on new input
+    _acHide(ta);
+    sync();
+    // Trigger autocomplete check
+    setTimeout(() => _acCheck(ta), 10);
+  });
   ta.addEventListener('scroll', () => {
     hlLayer.scrollTop = ta.scrollTop;
+    if (gutter) gutter.scrollTop = ta.scrollTop;
   });
   ta.addEventListener('keydown', e => {
+    // Autocomplete navigation
+    if (ta._acVisible) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); _acMove(ta, 1); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); _acMove(ta, -1); return; }
+      if (e.key === 'Tab' || e.key === 'Enter') {
+        if (ta._acIdx >= 0) { e.preventDefault(); _acSelect(ta); return; }
+      }
+      if (e.key === 'Escape') { e.preventDefault(); _acHide(ta); return; }
+    }
     // Tab → 2 spaces
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -3380,10 +3644,12 @@ function initHighlighter(ta) {
     }
     setTimeout(sync, 0);
   });
+  // Hide autocomplete on blur
+  ta.addEventListener('blur', () => setTimeout(() => _acHide(ta), 200));
+
   // Initial render
   sync();
   // Re-sync when value set externally (e.g. hint fill)
-  // Safe per-instance setter using defineProperty on the instance only
   const nativeDescriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
   if (nativeDescriptor && nativeDescriptor.set) {
     Object.defineProperty(ta, 'value', {
@@ -3392,6 +3658,191 @@ function initHighlighter(ta) {
       configurable: true,
     });
   }
+}
+
+// ── INLINE ERROR MARKING ─────────────────────────────────────────
+// Called after runSc/runFree when the SQL engine returns an error.
+// Attempts to extract the problematic token from the error message
+// and highlights it in the editor with a red underline.
+function markSQLError(ta, errMsg) {
+  if (!ta || !errMsg) return;
+  // Try to extract the problematic clause/value from common error patterns
+  let token = null;
+  // Pattern: "Onbekende WHERE-conditie: xxx"
+  let m = errMsg.match(/conditie:\s*(.+)/i);
+  if (m) token = m[1].trim();
+  // Pattern: "Tabel 'xxx' niet gevonden" or column references
+  if (!token) { m = errMsg.match(/(?:tabel|table|kolom|column)\s+['"]?(\w+)['"]?/i); if (m) token = m[1]; }
+  // Pattern: quoted value in error
+  if (!token) { m = errMsg.match(/<code>([^<]+)<\/code>/); if (m) token = m[1].replace(/'/g,''); }
+  // Pattern: "bestaat niet" with the subject before it
+  if (!token) { m = errMsg.match(/['"](\w+)['"]\s+(?:bestaat niet|not found)/i); if (m) token = m[1]; }
+  if (token && token.length > 1 && token.length < 60) {
+    ta._sqlErrToken = token;
+    // Re-trigger highlight sync
+    const wrap = ta.closest('.hl-wrap') || ta.closest('.sq-wrap');
+    const hlLayer = wrap ? wrap.querySelector('.hl-backdrop, .sql-highlight-layer') : null;
+    if (hlLayer) {
+      let highlighted = sqlHighlight(ta.value);
+      const errEsc = token.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const errRe = new RegExp('(' + errEsc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'i');
+      highlighted = highlighted.replace(errRe, '<span class="hl-err">$1</span>');
+      hlLayer.innerHTML = highlighted + '\n';
+    }
+  }
+}
+
+// ── AUTOCOMPLETE ─────────────────────────────────────────────────
+// Context-aware SQL autocomplete: suggests table names after FROM/JOIN,
+// column names after SELECT/WHERE/ON/SET/BY, and keywords everywhere.
+function _acBuildItems() {
+  // Build completion list from current DB state
+  const items = [];
+  // Tables
+  for (const tbl of Object.keys(DB)) {
+    items.push({ text: tbl, type: 'table', badge: 'TBL' });
+    // Columns for each table
+    for (const col of DB[tbl].cols) {
+      items.push({ text: col.n, type: 'column', badge: tbl, table: tbl });
+      // Also add prefixed version for JOINs
+      items.push({ text: tbl + '.' + col.n, type: 'column', badge: tbl + '.col', table: tbl });
+    }
+  }
+  // SQL keywords (most common)
+  const kws = ['SELECT','FROM','WHERE','AND','OR','ORDER BY','GROUP BY',
+    'HAVING','LIMIT','INSERT INTO','VALUES','UPDATE','SET','DELETE FROM',
+    'INNER JOIN','LEFT JOIN','RIGHT JOIN','ON','AS','DISTINCT','BETWEEN',
+    'LIKE','IN','NOT IN','IS NULL','IS NOT NULL','COUNT(*)','AVG','SUM','MAX','MIN',
+    'ASC','DESC','CASE','WHEN','THEN','ELSE','END','CREATE TABLE','ALTER TABLE'];
+  for (const kw of kws) items.push({ text: kw, type: 'keyword', badge: 'SQL' });
+  return items;
+}
+
+function _acGetDropdown(ta) {
+  if (ta._acEl) return ta._acEl;
+  const wrap = ta.closest('.hl-wrap') || ta.closest('.sq-wrap') || ta.parentNode;
+  const dd = document.createElement('div');
+  dd.className = 'sql-ac';
+  wrap.appendChild(dd);
+  ta._acEl = dd;
+  ta._acIdx = -1;
+  ta._acItems = [];
+  ta._acVisible = false;
+  // Click handler
+  dd.addEventListener('mousedown', e => {
+    const item = e.target.closest('.sql-ac-item');
+    if (item) { e.preventDefault(); ta._acIdx = Number(item.dataset.idx); _acSelect(ta); }
+  });
+  return dd;
+}
+
+function _acCheck(ta) {
+  if (!ta || ta.disabled) return;
+  const val = ta.value;
+  const pos = ta.selectionStart;
+  if (pos === 0) { _acHide(ta); return; }
+
+  // Get the word being typed (from last space/newline to cursor)
+  const before = val.slice(0, pos);
+  const wordMatch = before.match(/([\w.]+)$/);
+  if (!wordMatch || wordMatch[1].length < 1) { _acHide(ta); return; }
+  const prefix = wordMatch[1].toLowerCase();
+  if (prefix.length < 1) { _acHide(ta); return; }
+
+  // Determine context: what keyword precedes the current word?
+  const contextBefore = before.slice(0, before.length - wordMatch[1].length).replace(/\s+$/, '').toLowerCase();
+  const isTableCtx = /(?:from|join|into|update|table)\s*$/i.test(contextBefore);
+  const isColCtx = /(?:select|where|on|set|by|and|or|having|,)\s*$/i.test(contextBefore);
+
+  // Build and filter items
+  const allItems = _acBuildItems();
+  let filtered;
+  if (isTableCtx) {
+    filtered = allItems.filter(it => it.type === 'table' && it.text.toLowerCase().startsWith(prefix));
+  } else if (isColCtx) {
+    filtered = allItems.filter(it =>
+      (it.type === 'column' || it.type === 'keyword') &&
+      it.text.toLowerCase().startsWith(prefix) &&
+      !it.text.includes('.')  // don't show prefixed versions in non-join context
+    );
+  } else {
+    filtered = allItems.filter(it => it.text.toLowerCase().startsWith(prefix));
+  }
+
+  // Deduplicate and limit
+  const seen = new Set();
+  filtered = filtered.filter(it => {
+    const k = it.text.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).slice(0, 8);
+
+  if (!filtered.length) { _acHide(ta); return; }
+
+  // Show dropdown
+  const dd = _acGetDropdown(ta);
+  ta._acItems = filtered;
+  ta._acIdx = 0;
+  ta._acPrefix = wordMatch[1];
+  dd.innerHTML = filtered.map((it, i) =>
+    `<div class="sql-ac-item ${i === 0 ? 'active' : ''}" data-idx="${i}">
+      <span class="sql-ac-badge">${esc(it.badge)}</span>
+      <span>${esc(it.text)}</span>
+    </div>`
+  ).join('');
+  // Position near cursor
+  _acPosition(ta, dd);
+  dd.classList.add('visible');
+  ta._acVisible = true;
+}
+
+function _acPosition(ta, dd) {
+  // Approximate cursor position using a mirror div technique
+  const taRect = ta.getBoundingClientRect();
+  const wrapRect = (ta.closest('.hl-wrap') || ta.parentNode).getBoundingClientRect();
+  // Estimate line/col from text before cursor
+  const before = ta.value.slice(0, ta.selectionStart);
+  const lines = before.split('\n');
+  const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 24;
+  const charW = 8.4; // approximate monospace char width
+  const topOffset = (lines.length * lineH) - ta.scrollTop + 4;
+  const leftOffset = Math.min((lines[lines.length - 1].length * charW) + 44, taRect.width - 170);
+  dd.style.top = topOffset + 'px';
+  dd.style.left = Math.max(44, leftOffset) + 'px';
+}
+
+function _acMove(ta, dir) {
+  const dd = ta._acEl;
+  if (!dd || !ta._acItems.length) return;
+  ta._acIdx = Math.max(0, Math.min(ta._acItems.length - 1, ta._acIdx + dir));
+  dd.querySelectorAll('.sql-ac-item').forEach((el, i) => {
+    el.classList.toggle('active', i === ta._acIdx);
+  });
+  // Scroll into view
+  const activeEl = dd.querySelector('.sql-ac-item.active');
+  if (activeEl) activeEl.scrollIntoView({ block: 'nearest' });
+}
+
+function _acSelect(ta) {
+  if (!ta._acItems || ta._acIdx < 0) return;
+  const item = ta._acItems[ta._acIdx];
+  const prefix = ta._acPrefix || '';
+  const pos = ta.selectionStart;
+  const val = ta.value;
+  // Replace the prefix with the selected text
+  const newVal = val.slice(0, pos - prefix.length) + item.text + ' ' + val.slice(pos);
+  // Use native setter to trigger sync
+  const desc = Object.getOwnPropertyDescriptor(ta, 'value');
+  if (desc && desc.set) desc.set.call(ta, newVal);
+  else ta.value = newVal;
+  ta.selectionStart = ta.selectionEnd = pos - prefix.length + item.text.length + 1;
+  ta.focus();
+  _acHide(ta);
+}
+
+function _acHide(ta) {
+  if (ta._acEl) { ta._acEl.classList.remove('visible'); ta._acVisible = false; ta._acIdx = -1; }
 }
 
 // Initialiseer de highlighter op alle SQL-tekstvakken wanneer ze zichtbaar worden
@@ -3433,6 +3884,9 @@ function initAllHighlighters() {
 
 // ── INIT ──────────────────────────────────────────────────────────
 (function init() {
+  // Fix #3: Restore any timer state that was saved before a tab close
+  _restoreTimerState();
+
   const hasSave = load();
   if (hasSave) {
     EL['boot-name'].value = G.name;
@@ -3499,13 +3953,13 @@ document.addEventListener('click', function(e) {
     case 'start-game':        APP.startGame(); break;
     case 'skip-cin':          APP.startGameSkipCin(); break;
     case 'clear-free':        APP.clearFree(); break;
-    case 'run-free':          APP.runFree(); break;
+    case 'run-free':          if(_canExecSQL()) APP.runFree(); break;
     case 'tut-next':          TUT._next(); break;
     case 'set-ch':            APP.setCh(Number(el.dataset.ch)); break;
     case 'toggle-sc':         APP.toggleSc(el.dataset.sc); break;
     case 'show-hint':         APP.showHint(el.dataset.sc); break;
     case 'next-hint':         APP.nextHint(el.dataset.sc); break;
-    case 'run-sc':            APP.runSc(el.dataset.sc); break;
+    case 'run-sc':            if(_canExecSQL()) APP.runSc(el.dataset.sc); break;
     case 'replay-sc':         APP.replaySc(el.dataset.sc); break;
     case 'render-table':      APP.renderDBTable(el.dataset.table); break;
     case 'cin-done':          APP.cinDone(); break;
@@ -3522,7 +3976,15 @@ document.addEventListener('click', function(e) {
       if (s) { const exp = s.classList.toggle('expanded'); el.textContent = exp ? t('js_less_read') : t('js_more_read'); }
       break;
     }
-    case 'daily-run':         DAILY.run(el.dataset.diff); break;
+    case 'toggle-daily-tables': {
+      const tp = document.getElementById('daily-tables-' + el.dataset.diff);
+      if (tp) {
+        const nowHidden = tp.classList.toggle('hidden');
+        el.textContent = nowHidden ? t('js_daily_view_tables') : t('js_daily_hide_tables');
+      }
+      break;
+    }
+    case 'daily-run':         if(_canExecSQL()) DAILY.run(el.dataset.diff); break;
     case 'daily-reveal':      DAILY.revealSolution(el.dataset.diff); break;
     case 'open-tut-lesson':   APP.showPanel('tut'); TUT.openModule(el.dataset.mod); TUT._activeLes = Number(el.dataset.les); TUT.render(); break;
     case 'open-tut-module':   TUT.openModule(el.dataset.mod); break;
